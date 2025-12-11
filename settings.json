@@ -1,0 +1,9 @@
+{
+  "editor.quickSuggestions": {
+    "other": true,
+    "comments": true,
+    "strings": true
+  },
+  "editor.inlineSuggest.enabled": true,
+  "editor.suggest.showWords": true
+}
