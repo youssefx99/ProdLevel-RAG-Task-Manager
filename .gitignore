@@ -3,6 +3,9 @@
 /node_modules
 /build
 
+#keys
+faisal.pem
+
 # Logs
 logs
 *.log
