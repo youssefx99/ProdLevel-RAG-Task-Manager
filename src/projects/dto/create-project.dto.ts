@@ -8,8 +8,4 @@ export class CreateProjectDto {
   @IsString()
   @IsOptional()
   description?: string;
-
-  @IsString()
-  @IsNotEmpty()
-  teamId: string;
 }

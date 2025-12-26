@@ -19,14 +19,21 @@ export class Team {
   name: string;
 
   @Column()
+  projectId: string;
+
+  @ManyToOne('Project', 'teams')
+  @JoinColumn({ name: 'projectId' })
+  project: any;
+
+  @Column()
   ownerId: string;
 
   @ManyToOne(() => User, { eager: false })
   @JoinColumn({ name: 'ownerId' })
   owner: User;
 
-  @OneToMany('Project', 'team')
-  projects: any[];
+  @OneToMany(() => User, (user) => user.team)
+  users: User[];
 
   @CreateDateColumn()
   createdAt: Date;

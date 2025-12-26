@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -9,12 +10,16 @@ import * as bcrypt from 'bcrypt';
 import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { IndexingService } from '../ai/indexing/indexing.service';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    private readonly indexingService: IndexingService,
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
@@ -35,7 +40,19 @@ export class UsersService {
       password: hashedPassword,
     });
 
-    return await this.userRepository.save(user);
+    const savedUser = await this.userRepository.save(user);
+
+    // Auto-index to Qdrant
+    try {
+      await this.indexingService.indexUser(savedUser.id);
+      this.logger.log(`✓ User ${savedUser.id} indexed to Qdrant`);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to index user ${savedUser.id}: ${error.message}`,
+      );
+    }
+
+    return savedUser;
   }
 
   async findAll(): Promise<User[]> {

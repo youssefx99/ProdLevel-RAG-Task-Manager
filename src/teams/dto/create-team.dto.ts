@@ -7,5 +7,9 @@ export class CreateTeamDto {
 
   @IsString()
   @IsNotEmpty()
+  projectId: string;
+
+  @IsString()
+  @IsNotEmpty()
   ownerId: string;
 }

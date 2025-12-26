@@ -4,8 +4,6 @@ import {
   PrimaryGeneratedColumn,
   CreateDateColumn,
   UpdateDateColumn,
-  ManyToOne,
-  JoinColumn,
   OneToMany,
 } from 'typeorm';
 import { Team } from '../teams/team.entity';
@@ -21,15 +19,8 @@ export class Project {
   @Column({ nullable: true })
   description: string;
 
-  @Column()
-  teamId: string;
-
-  @ManyToOne(() => Team, (team) => team.projects, { eager: false })
-  @JoinColumn({ name: 'teamId' })
-  team: Team;
-
-  @OneToMany('Task', 'project')
-  tasks: any[];
+  @OneToMany(() => Team, (team) => team.project)
+  teams: Team[];
 
   @CreateDateColumn()
   createdAt: Date;
