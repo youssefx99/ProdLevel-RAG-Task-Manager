@@ -34,8 +34,25 @@ services:
       timeout: 3s
       retries: 5
 
+  qdrant:
+    image: qdrant/qdrant:v1.2.0
+    container_name: task_management_qdrant
+    restart: always
+    ports:
+      - '${QDRANT_PORT}:6333'
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        ['CMD', 'curl', '-f', 'http://${QDRANT_HOST}:${QDRANT_PORT}/healthz']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   mysql_data:
     driver: local
   redis_data:
+    driver: local
+  qdrant_data:
     driver: local
