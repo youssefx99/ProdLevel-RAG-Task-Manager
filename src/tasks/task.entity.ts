@@ -7,7 +7,6 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
-import { Project } from '../projects/project.entity';
 import { User } from '../users/user.entity';
 
 export enum TaskStatus {
@@ -30,17 +29,10 @@ export class Task {
   @Column({ type: 'enum', enum: TaskStatus, default: TaskStatus.TODO })
   status: TaskStatus;
 
-  @Column()
-  projectId: string;
-
-  @ManyToOne(() => Project, (project) => project.tasks, { eager: false })
-  @JoinColumn({ name: 'projectId' })
-  project: Project;
-
-  @Column()
+  @Column({ nullable: true })
   assignedTo: string;
 
-  @ManyToOne(() => User, { eager: false })
+  @ManyToOne(() => User, (user) => user.tasks, { eager: false, nullable: true })
   @JoinColumn({ name: 'assignedTo' })
   assignee: User;
 

@@ -21,12 +21,8 @@ export class CreateTaskDto {
   status?: TaskStatus;
 
   @IsString()
-  @IsNotEmpty()
-  projectId: string;
-
-  @IsString()
-  @IsNotEmpty()
-  assignedTo: string;
+  @IsOptional()
+  assignedTo?: string;
 
   @IsDateString()
   @IsOptional()
