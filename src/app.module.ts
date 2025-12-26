@@ -7,14 +7,16 @@ import { TeamsModule } from './teams/teams.module';
 import { ProjectsModule } from './projects/projects.module';
 import { TasksModule } from './tasks/tasks.module';
 import { AuthModule } from './auth/auth.module';
+import { AiModule } from './ai/ai.module';
 import databaseConfig from './config/database.config';
+import qdrantConfig from './config/qdrant.config';
 
 @Module({
   imports: [
     // Global config
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [databaseConfig],
+      load: [databaseConfig, qdrantConfig],
       envFilePath: '.env',
     }),
 
@@ -28,6 +30,9 @@ import databaseConfig from './config/database.config';
 
     // Auth module
     AuthModule,
+
+    // AI module
+    AiModule,
 
     // Feature modules
     UsersModule,
