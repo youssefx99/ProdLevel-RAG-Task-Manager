@@ -128,15 +128,47 @@ export class FormattingService {
 
   /**
    * Parse JSON from LLM response
+   * ROOT FIX: Handle malformed JSON with extra braces (common LLM error)
    */
   extractJsonFromResponse(response: string): any | null {
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
+    let jsonStr = jsonMatch[0];
+
+    // First try direct parse
     try {
-      return JSON.parse(jsonMatch[0]);
+      return JSON.parse(jsonStr);
     } catch {
-      return null;
+      // ROOT FIX: Try to fix common LLM JSON errors
+
+      // 1. Remove extra trailing braces (e.g., "}}" -> "}")
+      // Count opening and closing braces to balance them
+      let openCount = 0;
+      let closeCount = 0;
+      for (const char of jsonStr) {
+        if (char === '{') openCount++;
+        if (char === '}') closeCount++;
+      }
+
+      // If more closing than opening, trim the extras from the end
+      if (closeCount > openCount) {
+        const excess = closeCount - openCount;
+        // Remove excess closing braces from the end
+        for (let i = 0; i < excess; i++) {
+          const lastBrace = jsonStr.lastIndexOf('}');
+          if (lastBrace !== -1) {
+            jsonStr = jsonStr.substring(0, lastBrace) + jsonStr.substring(lastBrace + 1);
+          }
+        }
+      }
+
+      // Try parsing the fixed string
+      try {
+        return JSON.parse(jsonStr);
+      } catch {
+        return null;
+      }
     }
   }
 
