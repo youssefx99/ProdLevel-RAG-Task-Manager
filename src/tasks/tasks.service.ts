@@ -41,15 +41,26 @@ export class TasksService {
   async findAll(
     page: number = 1,
     limit: number = 10,
+    search?: string,
   ): Promise<PaginatedResult<Task>> {
     const skip = (page - 1) * limit;
 
-    const [data, total] = await this.taskRepository.findAndCount({
-      relations: ['assignee', 'assignee.team', 'assignee.team.project'],
-      order: { createdAt: 'DESC' },
-      skip,
-      take: limit,
-    });
+    const queryBuilder = this.taskRepository
+      .createQueryBuilder('task')
+      .leftJoinAndSelect('task.assignee', 'assignee')
+      .leftJoinAndSelect('assignee.team', 'team')
+      .leftJoinAndSelect('team.project', 'project');
+
+    if (search) {
+      queryBuilder.where(
+        '(task.title LIKE :search OR task.description LIKE :search)',
+        { search: `%${search}%` },
+      );
+    }
+
+    queryBuilder.orderBy('task.createdAt', 'DESC').skip(skip).take(limit);
+
+    const [data, total] = await queryBuilder.getManyAndCount();
 
     return {
       data,
