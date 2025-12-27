@@ -37,15 +37,24 @@ export class ProjectsService {
   async findAll(
     page: number = 1,
     limit: number = 10,
+    search?: string,
   ): Promise<PaginatedResult<Project>> {
     const skip = (page - 1) * limit;
 
-    const [data, total] = await this.projectRepository.findAndCount({
-      relations: ['teams'],
-      order: { createdAt: 'DESC' },
-      skip,
-      take: limit,
-    });
+    const queryBuilder = this.projectRepository
+      .createQueryBuilder('project')
+      .leftJoinAndSelect('project.teams', 'teams');
+
+    if (search) {
+      queryBuilder.where(
+        '(project.name LIKE :search OR project.description LIKE :search)',
+        { search: `%${search}%` },
+      );
+    }
+
+    queryBuilder.orderBy('project.createdAt', 'DESC').skip(skip).take(limit);
+
+    const [data, total] = await queryBuilder.getManyAndCount();
 
     return {
       data,
