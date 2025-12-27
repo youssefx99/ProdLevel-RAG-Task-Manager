@@ -5,6 +5,7 @@ import { Task } from './task.entity';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { IndexingService } from '../ai/indexing/indexing.service';
+import { PaginatedResult } from '../common/dto/pagination.dto';
 
 @Injectable()
 export class TasksService {
@@ -37,11 +38,26 @@ export class TasksService {
     return savedTask;
   }
 
-  async findAll(): Promise<Task[]> {
-    return await this.taskRepository.find({
+  async findAll(
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<PaginatedResult<Task>> {
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await this.taskRepository.findAndCount({
       relations: ['assignee', 'assignee.team', 'assignee.team.project'],
       order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<Task> {
@@ -78,5 +94,9 @@ export class TasksService {
   async remove(id: string): Promise<void> {
     const task = await this.findOne(id);
     await this.taskRepository.remove(task);
+  }
+
+  async count(): Promise<number> {
+    return this.taskRepository.count();
   }
 }
