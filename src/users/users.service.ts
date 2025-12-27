@@ -59,14 +59,24 @@ export class UsersService {
   async findAll(
     page: number = 1,
     limit: number = 10,
+    search?: string,
   ): Promise<PaginatedResult<User>> {
     const skip = (page - 1) * limit;
 
-    const [data, total] = await this.userRepository.findAndCount({
-      order: { createdAt: 'DESC' },
-      skip,
-      take: limit,
-    });
+    const queryBuilder = this.userRepository.createQueryBuilder('user');
+
+    if (search) {
+      queryBuilder.where(
+        '(user.name LIKE :search OR user.email LIKE :search)',
+        {
+          search: `%${search}%`,
+        },
+      );
+    }
+
+    queryBuilder.orderBy('user.createdAt', 'DESC').skip(skip).take(limit);
+
+    const [data, total] = await queryBuilder.getManyAndCount();
 
     return {
       data,
@@ -75,6 +85,10 @@ export class UsersService {
       limit,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  async count(): Promise<number> {
+    return this.userRepository.count();
   }
 
   async findOne(id: string): Promise<User> {
