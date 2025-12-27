@@ -75,6 +75,14 @@ export class TasksService {
 
   async update(id: string, updateTaskDto: UpdateTaskDto): Promise<Task> {
     const task = await this.findOne(id);
+    
+    // ROOT FIX: Clear the assignee relation when assignedTo changes
+    // This ensures TypeORM properly updates the FK and doesn't cache stale relation
+    if (updateTaskDto.assignedTo !== undefined) {
+      // Clear the loaded relation so TypeORM uses the new FK value
+      task.assignee = null as any;
+    }
+    
     Object.assign(task, updateTaskDto);
     const updatedTask = await this.taskRepository.save(task);
 
