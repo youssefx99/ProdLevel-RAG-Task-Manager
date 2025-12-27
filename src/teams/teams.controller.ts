@@ -8,10 +8,12 @@ import {
   Delete,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
 import { TeamsService } from './teams.service';
 import { CreateTeamDto } from './dto/create-team.dto';
 import { UpdateTeamDto } from './dto/update-team.dto';
+import { PaginationQueryDto } from '../common/dto/pagination.dto';
 
 @Controller('teams')
 export class TeamsController {
@@ -24,8 +26,15 @@ export class TeamsController {
   }
 
   @Get()
-  findAll() {
-    return this.teamsService.findAll();
+  findAll(@Query() query: PaginationQueryDto) {
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 10;
+    return this.teamsService.findAll(page, limit);
+  }
+
+  @Get('count')
+  count() {
+    return this.teamsService.count();
   }
 
   @Get(':id')
