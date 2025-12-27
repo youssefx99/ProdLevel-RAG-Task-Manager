@@ -45,7 +45,8 @@ export class TeamsController {
   findAll(@Query() query: PaginationQueryDto) {
     const page = Number(query.page) || 1;
     const limit = Number(query.limit) || 10;
-    return this.teamsService.findAll(page, limit);
+    const search = query.search;
+    return this.teamsService.findAll(page, limit, search);
   }
 
   @Get('count')
