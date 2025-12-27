@@ -45,7 +45,13 @@ export class UsersController {
   findAll(@Query() query: PaginationQueryDto) {
     const page = Number(query.page) || 1;
     const limit = Number(query.limit) || 10;
-    return this.usersService.findAll(page, limit);
+    const search = query.search;
+    return this.usersService.findAll(page, limit, search);
+  }
+
+  @Get('count')
+  count() {
+    return this.usersService.count();
   }
 
   @Get(':id')
