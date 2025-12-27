@@ -17,7 +17,7 @@ export class RetrievalService {
     return reranked;
   }
 
-  applyMMR(docs: RetrievedDoc[], lambda: number = 0.7): RetrievedDoc[] {
+  applyMMR(docs: RetrievedDoc[], lambda: number = 0.85): RetrievedDoc[] {
     this.logger.debug(
       `🎯 Applying MMR to ${docs.length} docs (lambda=${lambda})`,
     );
@@ -26,7 +26,10 @@ export class RetrievalService {
       return [];
     }
 
+    // Always keep the top-scored document first (guaranteed relevance)
     const selected: RetrievedDoc[] = [docs[0]];
+    this.logger.debug(`│  MMR [1]: ${docs[0].text.substring(0, 50)}... (score: ${docs[0].score.toFixed(4)})`);
+    
     const remaining = docs.slice(1);
 
     while (selected.length < 5 && remaining.length > 0) {
@@ -41,7 +44,7 @@ export class RetrievalService {
           ...selected.map((s) => this.textSimilarity(doc.text, s.text)),
         );
 
-        // MMR score
+        // MMR score: higher lambda = more weight on relevance, less on diversity
         const mmrScore = lambda * doc.score - (1 - lambda) * maxSim;
 
         if (mmrScore > bestScore) {
@@ -123,15 +126,25 @@ export class RetrievalService {
     sources: Source[];
     context: string;
   } {
-    // Reranking
-    const rerankedDocs = globalDocs.slice(0, 10); // Simplified rerank
+    // Sort by score to ensure highest-relevance docs are first
+    const sortedDocs = [...globalDocs].sort((a, b) => b.score - a.score);
+    
+    // Log top results for debugging
+    this.logger.log(`📊 Top 3 after RRF sort:`);
+    sortedDocs.slice(0, 3).forEach((doc, i) => {
+      this.logger.log(`│  ${i + 1}. [${doc.entityType}] ${doc.text.substring(0, 60)}... (score: ${doc.score.toFixed(4)})`);
+    });
+
+    // Reranking - take top 10 sorted by score
+    const rerankedDocs = sortedDocs.slice(0, 10);
     this.logger.log(`├─ Reranked: ${rerankedDocs.length} docs`);
 
     // MMR / Diversity Filtering (Conditional)
+    // Use higher lambda (0.85) to favor relevance over diversity
     let diverseDocs: RetrievedDoc[];
     if (rerankedDocs.length >= 5) {
-      diverseDocs = this.applyMMR(rerankedDocs, 0.7);
-      this.logger.log(`├─ MMR diversity: ${diverseDocs.length} docs`);
+      diverseDocs = this.applyMMR(rerankedDocs, 0.85);
+      this.logger.log(`├─ MMR diversity (λ=0.85): ${diverseDocs.length} docs`);
     } else {
       diverseDocs = rerankedDocs;
       this.logger.log(`├─ Skipping MMR (< 5 docs): ${diverseDocs.length} docs`);

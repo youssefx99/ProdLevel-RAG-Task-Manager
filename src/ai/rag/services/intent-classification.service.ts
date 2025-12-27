@@ -228,16 +228,6 @@ export class IntentClassificationService {
     // Always include original query first
     const queries = [query];
 
-    // For simple queries (< 15 chars), skip LLM reformulation
-    if (query.length < 15) {
-      this.logger.debug(
-        `⚠️ Query too short (${query.length} chars), skipping reformulation`,
-      );
-      this.logger.debug(`📤 OUTPUT - Queries: ["${query}"]`);
-      this.logger.debug(`${'='.repeat(60)}\n`);
-      return queries;
-    }
-
     // Build history context
     const historyContext = this.formattingService.formatHistoryCompact(
       history,

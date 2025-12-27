@@ -158,7 +158,9 @@ export class FormattingService {
         for (let i = 0; i < excess; i++) {
           const lastBrace = jsonStr.lastIndexOf('}');
           if (lastBrace !== -1) {
-            jsonStr = jsonStr.substring(0, lastBrace) + jsonStr.substring(lastBrace + 1);
+            jsonStr =
+              jsonStr.substring(0, lastBrace) +
+              jsonStr.substring(lastBrace + 1);
           }
         }
       }
