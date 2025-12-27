@@ -41,19 +41,26 @@ export class SearchService {
 
     // Build Qdrant filter properly
     const qdrantFilter: any = { must: [] };
+    let hasFilter = false;
 
-    // Support both single entity_type and multiple entity_types
+    // Support both single entity_type and array of entity_types
     if (filters.entity_type) {
-      qdrantFilter.must.push({
-        key: 'entity_type',
-        match: { value: filters.entity_type },
-      });
-    } else if (filters.entity_types && filters.entity_types.length > 0) {
-      // Multi-entity filter: use "should" (OR logic)
-      qdrantFilter.should = filters.entity_types.map((type: string) => ({
-        key: 'entity_type',
-        match: { value: type },
-      }));
+      if (Array.isArray(filters.entity_type)) {
+        // Multiple entity types: use should (OR logic)
+        // Qdrant requires should to be in a separate filter object
+        qdrantFilter.should = filters.entity_type.map((type: string) => ({
+          key: 'entity_type',
+          match: { value: type },
+        }));
+        hasFilter = true;
+      } else {
+        // Single entity type
+        qdrantFilter.must.push({
+          key: 'entity_type',
+          match: { value: filters.entity_type },
+        });
+        hasFilter = true;
+      }
     }
 
     if (filters['metadata.is_overdue']) {
@@ -61,6 +68,7 @@ export class SearchService {
         key: 'metadata.is_overdue',
         match: { value: filters['metadata.is_overdue'] },
       });
+      hasFilter = true;
     }
 
     if (filters['metadata.is_urgent']) {
@@ -68,6 +76,7 @@ export class SearchService {
         key: 'metadata.is_urgent',
         match: { value: filters['metadata.is_urgent'] },
       });
+      hasFilter = true;
     }
 
     if (filters['metadata.task_status']) {
@@ -75,13 +84,19 @@ export class SearchService {
         key: 'metadata.task_status',
         match: { value: filters['metadata.task_status'] },
       });
+      hasFilter = true;
+    }
+
+    // Clean up empty must array when using should
+    if (qdrantFilter.must.length === 0) {
+      delete qdrantFilter.must;
     }
 
     const results = await this.qdrantService.searchVectors(
       this.collectionName,
       embedding,
       10,
-      qdrantFilter.must.length > 0 ? qdrantFilter : undefined,
+      hasFilter ? qdrantFilter : undefined,
     );
 
     this.logger.debug(`\n📤 OUTPUT - Found ${results.length} results:`);
@@ -135,27 +150,36 @@ export class SearchService {
     // Use Qdrant scroll to get documents matching filters (no embedding needed)
     try {
       const qdrantFilter: any = { must: [] };
+      let hasFilter = false;
 
       if (filters.entity_type) {
-        qdrantFilter.must.push({
-          key: 'entity_type',
-          match: { value: filters.entity_type },
-        });
-      } else if (filters.entity_types && filters.entity_types.length > 0) {
-        qdrantFilter.should = filters.entity_types.map((type: string) => ({
-          key: 'entity_type',
-          match: { value: type },
-        }));
+        if (Array.isArray(filters.entity_type)) {
+          // Multiple entity types: use should (OR logic)
+          qdrantFilter.should = filters.entity_type.map((type: string) => ({
+            key: 'entity_type',
+            match: { value: type },
+          }));
+          hasFilter = true;
+        } else {
+          // Single entity type
+          qdrantFilter.must.push({
+            key: 'entity_type',
+            match: { value: filters.entity_type },
+          });
+          hasFilter = true;
+        }
+      }
+
+      // Clean up empty must array when using should
+      if (qdrantFilter.must.length === 0) {
+        delete qdrantFilter.must;
       }
 
       // Get documents via scroll (no embedding, just filter)
-      // what does scrollPoints mean? asnwer: It is a method to retrieve all points/documents from Qdrant that match certain criteria, typically used for large datasets.
       const scrollResults = await this.qdrantService.scrollPoints(
         this.collectionName,
-        qdrantFilter.must.length > 0 || qdrantFilter.should
-          ? qdrantFilter
-          : undefined,
-        60, // Limit to 50 docs for BM25
+        hasFilter ? qdrantFilter : undefined,
+        60, // Limit to 60 docs for BM25
       );
 
       // BM25-style scoring
