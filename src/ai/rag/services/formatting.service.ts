@@ -10,6 +10,7 @@ import { RetrievedDoc } from './search.service';
 export class FormattingService {
   /**
    * Format conversation history for prompts (compact format)
+   * Handles summary role for condensed conversation history
    */
   formatHistoryCompact(
     history: ConversationHistory[],
@@ -19,12 +20,18 @@ export class FormattingService {
     if (recentHistory.length === 0) return '';
 
     return recentHistory
-      .map((h) => `[${h.role[0].toUpperCase()}] ${h.content}`)
+      .map((h) => {
+        if (h.role === 'summary') {
+          return `[CONTEXT] ${h.content}`;
+        }
+        return `[${h.role[0].toUpperCase()}] ${h.content}`;
+      })
       .join('\n');
   }
 
   /**
    * Format conversation history for prompts (detailed format)
+   * Handles summary role for condensed conversation history
    */
   formatHistoryDetailed(
     history: ConversationHistory[],
@@ -34,7 +41,12 @@ export class FormattingService {
     if (recentHistory.length === 0) return 'none';
 
     return recentHistory
-      .map((h) => `[${h.role === 'user' ? 'USER' : 'ASSISTANT'}] ${h.content}`)
+      .map((h) => {
+        if (h.role === 'summary') {
+          return `[PREVIOUS CONTEXT] ${h.content}`;
+        }
+        return `[${h.role === 'user' ? 'USER' : 'ASSISTANT'}] ${h.content}`;
+      })
       .join('\n');
   }
 
