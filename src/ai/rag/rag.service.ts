@@ -15,6 +15,8 @@ import { SearchService, RetrievedDoc } from './services/search.service';
 import { RetrievalService } from './services/retrieval.service';
 import { GenerationService } from './services/generation.service';
 import { ActionExecutionService } from './services/action-execution.service';
+import { buildReformulateQueryPrompt } from '../prompts';
+import { ref } from 'process';
 
 @Injectable()
 export class RagService {
@@ -133,19 +135,18 @@ export class RagService {
           history,
         );
       this.logger.log(`├─ Classification: ${classification.type}`);
-      this.logger.log(`├─ Intent: ${classification.intent}`);
-
-      // Step 1.3: Metadata Filter Extraction (LLM-based entity detection)
-      steps.push('metadata_extraction');
-      const filters = await this.intentClassificationService.extractFilters(
-        request.query,
-        history,
-        classification.type,
-        classification.intent,
-      );
+      this.logger.log(`├─ Intent: ${classification.intent} (derived)`);
       this.logger.log(
-        `└─ Smart Filters (type=${classification.type}): ${JSON.stringify(filters)}\n`,
+        `└─ Entities: ${classification.entities?.join(', ') || 'none'}`,
       );
+
+      // Step 1.3: Extract filters (OPTIMIZED: simplified signature)
+      steps.push('metadata_extraction');
+      const filters = this.intentClassificationService.extractFilters(
+        classification.type,
+        classification.entities,
+      );
+      this.logger.log(`   Filters: ${JSON.stringify(filters)}\n`);
 
       // ===== SPECIAL ROUTING: Handle different intent types =====
 
@@ -158,11 +159,23 @@ export class RagService {
         this.logger.log(
           `\n🔧 ACTION DETECTED: ${classification.type.toUpperCase()}`,
         );
-        // Actions don't need reformulation - just direct entity lookup
-        this.logger.log('├─ Skipping reformulation for action query');
-        this.logger.log('├─ Direct retrieval for entity resolution...');
+        // Reformulate actions for better entity resolution
+        this.logger.log('├─ Query reformulation for entity context...');
+        const reformulatedQueries =
+          await this.intentClassificationService.reformulateQuery(
+            request.query,
+            history,
+          );
+        this.logger.log(
+          `├─ Generated ${reformulatedQueries.length} search variations`,
+        );
+        reformulatedQueries.forEach((q, i) =>
+          this.logger.log(`│  ${i + 1}. ${q}`),
+        );
+
+        this.logger.log('├─ Retrieving entity context...');
         const actionDocs = await this.searchService.executeHybridSearch(
-          [request.query], // Use original query only, no reformulation
+          reformulatedQueries, // Use reformulated queries for better retrieval
           filters,
         );
 
@@ -443,12 +456,10 @@ export class RagService {
             reformulatedQueries = [request.query];
           }
 
-          // Extract filters (with history for context)
-          const filters = await this.intentClassificationService.extractFilters(
-            request.query,
-            history,
+          // Extract filters (OPTIMIZED: simplified signature)
+          const filters = this.intentClassificationService.extractFilters(
             classification.type,
-            classification.intent,
+            classification.entities,
           );
 
           // Search
