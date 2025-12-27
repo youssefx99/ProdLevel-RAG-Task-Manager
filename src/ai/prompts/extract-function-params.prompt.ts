@@ -17,7 +17,7 @@ FUNCTION: ${funcName}
 PARAMETERS:
 ${paramList}
 
-DATABASE ENTITIES (use these IDs!):
+DATABASE ENTITIES (use these UUIDs!):
 ${retrievalContext}
 
 CONVERSATION HISTORY (extract missing parameters from here!):

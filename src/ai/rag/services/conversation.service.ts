@@ -141,8 +141,9 @@ Summary:`;
 
       const summary = await this.ollamaService.generateCompletion(
         summaryPrompt,
+        undefined,
         {
-          maxTokens: this.MAX_SUMMARY_TOKENS,
+          max_tokens: this.MAX_SUMMARY_TOKENS,
           temperature: 0.3,
         },
       );

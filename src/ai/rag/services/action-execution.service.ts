@@ -204,7 +204,7 @@ export class ActionExecutionService {
         query,
         classification,
         history,
-        contextDocs, // Use contextDocs (pre-retrieved or freshly retrieved)
+        contextDocs,
       );
 
       if (!functionCall) {

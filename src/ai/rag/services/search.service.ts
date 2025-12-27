@@ -149,12 +149,13 @@ export class SearchService {
       }
 
       // Get documents via scroll (no embedding, just filter)
+      // what does scrollPoints mean? asnwer: It is a method to retrieve all points/documents from Qdrant that match certain criteria, typically used for large datasets.
       const scrollResults = await this.qdrantService.scrollPoints(
         this.collectionName,
         qdrantFilter.must.length > 0 || qdrantFilter.should
           ? qdrantFilter
           : undefined,
-        50, // Limit to 50 docs for BM25
+        60, // Limit to 50 docs for BM25
       );
 
       // BM25-style scoring
