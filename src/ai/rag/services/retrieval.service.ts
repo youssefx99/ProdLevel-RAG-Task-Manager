@@ -7,13 +7,24 @@ export class RetrievalService {
   private readonly logger = new Logger(RetrievalService.name);
 
   async rerank(query: string, docs: RetrievedDoc[]): Promise<RetrievedDoc[]> {
+    this.logger.debug(
+      `🔄 Reranking ${docs.length} documents for query: "${query.substring(0, 50)}..."`,
+    );
     // Use LLM to rerank (or return as-is for now)
     // In production, use a cross-encoder model
-    return docs.slice(0, 10); // Keep top 10
+    const reranked = docs.slice(0, 10); // Keep top 10
+    this.logger.debug(`✅ Rerank complete: ${reranked.length} docs kept`);
+    return reranked;
   }
 
   applyMMR(docs: RetrievedDoc[], lambda: number = 0.7): RetrievedDoc[] {
-    if (docs.length === 0) return [];
+    this.logger.debug(
+      `🎯 Applying MMR to ${docs.length} docs (lambda=${lambda})`,
+    );
+    if (docs.length === 0) {
+      this.logger.debug('⚠️ No documents to apply MMR');
+      return [];
+    }
 
     const selected: RetrievedDoc[] = [docs[0]];
     const remaining = docs.slice(1);
@@ -43,6 +54,9 @@ export class RetrievalService {
       remaining.splice(bestIdx, 1);
     }
 
+    this.logger.debug(
+      `✅ MMR complete: selected ${selected.length} diverse docs`,
+    );
     return selected;
   }
 
@@ -57,6 +71,9 @@ export class RetrievalService {
   }
 
   compressContext(docs: RetrievedDoc[], maxTokens: number): RetrievedDoc[] {
+    this.logger.debug(
+      `✂️ Compressing context: ${docs.length} docs, max ${maxTokens} tokens`,
+    );
     let totalLength = 0;
     const compressed: RetrievedDoc[] = [];
 
@@ -66,10 +83,14 @@ export class RetrievalService {
         compressed.push(doc);
         totalLength += docLength;
       } else {
+        this.logger.debug(`⚠️ Token limit reached at doc ${compressed.length}`);
         break;
       }
     }
 
+    this.logger.debug(
+      `✅ Compressed to ${compressed.length} docs (${totalLength} chars)`,
+    );
     return compressed;
   }
 

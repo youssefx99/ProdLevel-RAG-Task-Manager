@@ -551,6 +551,39 @@ export class QdrantService implements OnModuleInit {
   }
 
   /**
+   * Scroll through points with filter (no vector required)
+   * ROOT FIX: For BM25 keyword search without embedding generation
+   */
+  async scrollPoints(
+    collectionName: string,
+    filter?: Record<string, any>,
+    limit: number = 50,
+  ): Promise<SearchResult[]> {
+    try {
+      const scrollRequest: any = {
+        limit,
+        with_payload: true,
+        with_vector: false, // Don't need vectors for keyword search
+      };
+
+      if (filter && (filter.must?.length > 0 || filter.should?.length > 0)) {
+        scrollRequest.filter = filter;
+      }
+
+      const results = await this.client.scroll(collectionName, scrollRequest);
+
+      return (results.points || []).map((point) => ({
+        id: point.id.toString(),
+        score: 0, // Will be calculated by BM25
+        payload: point.payload || {},
+      }));
+    } catch (error) {
+      this.logger.error(`Scroll failed: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Get Qdrant client for advanced operations
    */
   getClient(): QdrantClient {

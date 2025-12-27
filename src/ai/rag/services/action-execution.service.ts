@@ -1,13 +1,10 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
-import * as crypto from 'crypto';
+import { Injectable, Logger } from '@nestjs/common';
 import { encode as toTOON } from '@toon-format/toon';
-import { OllamaService } from '../../llm/ollama.service';
 import { UsersService } from '../../../users/users.service';
 import { TeamsService } from '../../../teams/teams.service';
 import { ProjectsService } from '../../../projects/projects.service';
 import { TasksService } from '../../../tasks/tasks.service';
+import { IndexingService } from '../../indexing/indexing.service';
 import { TaskStatus } from '../../../tasks/task.entity';
 import { Source } from '../../dto/chat.dto';
 import { GenerationService } from './generation.service';
@@ -16,6 +13,10 @@ import {
   ConversationService,
   ConversationHistory,
 } from './conversation.service';
+import { LLMCacheService } from './llm-cache.service';
+import { EntityResolutionService } from './entity-resolution.service';
+import { FormattingService } from './formatting.service';
+import { buildExtractFunctionParamsPrompt } from '../../prompts';
 
 export interface FunctionCall {
   name: string;
@@ -150,8 +151,6 @@ export class ActionExecutionService {
   private readonly logger = new Logger(ActionExecutionService.name);
 
   constructor(
-    private readonly ollamaService: OllamaService,
-    @Inject(CACHE_MANAGER) private cacheManager: Cache,
     private readonly usersService: UsersService,
     private readonly teamsService: TeamsService,
     private readonly projectsService: ProjectsService,
@@ -159,40 +158,18 @@ export class ActionExecutionService {
     private readonly generationService: GenerationService,
     private readonly conversationService: ConversationService,
     private readonly searchService: SearchService,
+    private readonly llmCacheService: LLMCacheService,
+    private readonly entityResolutionService: EntityResolutionService,
+    private readonly formattingService: FormattingService,
+    private readonly indexingService: IndexingService, // ROOT FIX: Update index after CRUD
   ) {}
-
-  // ===== CACHED LLM WRAPPER =====
-  private async cachedLLMCall(
-    prompt: string,
-    model?: string,
-    options?: { temperature?: number; system?: string },
-  ): Promise<string> {
-    const cacheKey = `llm:${crypto
-      .createHash('md5')
-      .update(prompt + (model || '') + JSON.stringify(options || {}))
-      .digest('hex')}`;
-
-    const cached = await this.cacheManager.get<string>(cacheKey);
-    if (cached) {
-      this.logger.debug(
-        `⚡ LLM CACHE HIT for prompt: ${prompt.substring(0, 50)}...`,
-      );
-      return cached;
-    }
-
-    const result = await this.ollamaService.generateCompletion(
-      prompt,
-      model,
-      options,
-    );
-    await this.cacheManager.set(cacheKey, result, 600000); // Cache for 10 minutes
-    return result;
-  }
 
   async executeAction(
     query: string,
     classification: { type: string; intent: string },
     sessionId: string,
+    retrievedDocs?: RetrievedDoc[], // Optional: pre-retrieved docs from RAG service
+    filters?: { entity_types?: string[] }, // Pass filters for context retrieval
   ): Promise<{
     answer: string;
     sources?: Source[];
@@ -202,23 +179,32 @@ export class ActionExecutionService {
       // Get conversation history for context
       const history = await this.conversationService.getHistory(sessionId);
 
-      // ===== NEW: RETRIEVAL BEFORE ACTION =====
-      // Search for relevant entities to get IDs and context
-      this.logger.log(`🔍 Retrieving context for action: "${query}"`);
-      const retrievedDocs = await this.retrieveActionContext(
-        query,
-        classification.intent,
-      );
-      this.logger.log(
-        `📄 Retrieved ${retrievedDocs.length} relevant documents`,
-      );
+      // ===== RETRIEVAL BEFORE ACTION =====
+      // Use pre-retrieved docs if provided (more efficient), otherwise retrieve now
+      let contextDocs: RetrievedDoc[];
+      if (retrievedDocs && retrievedDocs.length > 0) {
+        this.logger.log(
+          `📄 Using ${retrievedDocs.length} pre-retrieved documents`,
+        );
+        contextDocs = retrievedDocs;
+      } else {
+        this.logger.log(`🔍 Retrieving context for action: "${query}"`);
+        contextDocs = await this.retrieveActionContext(
+          query,
+          classification.intent,
+          filters, // Pass extracted filters with entity_types
+        );
+        this.logger.log(
+          `📄 Retrieved ${contextDocs.length} relevant documents`,
+        );
+      }
 
       // Use LLM to extract function call details WITH retrieved context
       const functionCall = await this.determineFunctionCall(
         query,
         classification,
         history,
-        retrievedDocs,
+        contextDocs, // Use contextDocs (pre-retrieved or freshly retrieved)
       );
 
       if (!functionCall) {
@@ -237,71 +223,122 @@ export class ActionExecutionService {
       let result: any;
       let answer: string;
 
-      // Execute the appropriate function
+      // Execute the appropriate function and format response using centralized formatting
       try {
+        // Parse action and entity type from function name
+        const [action, entityType] = functionCall.name.split('_');
+
         switch (functionCall.name) {
           // TASK OPERATIONS
           case 'create_task':
             result = await this.executeCreateTask(functionCall.arguments);
-            answer = `✅ Task created successfully!\n\n**Task Details:**\n- Title: ${result.title}\n- Description: ${result.description || 'N/A'}\n- Status: ${result.status}\n- Assigned to: ${result.assignedTo || 'Unassigned'}\n- Deadline: ${result.deadline ? new Date(result.deadline).toLocaleDateString() : 'N/A'}\n- Task ID: ${result.id}`;
+            answer = this.formattingService.formatActionResult(
+              'create',
+              'task',
+              result,
+            );
             break;
 
           case 'update_task':
             result = await this.executeUpdateTask(functionCall.arguments);
-            answer = `✅ Task updated successfully!\n\n**Updated Task:**\n- Title: ${result.title}\n- Status: ${result.status}\n- Description: ${result.description || 'N/A'}`;
+            answer = this.formattingService.formatActionResult(
+              'update',
+              'task',
+              result,
+            );
             break;
 
           case 'delete_task':
             result = await this.executeDeleteTask(functionCall.arguments);
-            answer = `✅ Task deleted successfully! (Task ID: ${functionCall.arguments.taskId})`;
+            answer = this.formattingService.formatActionResult(
+              'delete',
+              'task',
+              { taskId: functionCall.arguments.taskId },
+            );
             break;
 
           // USER OPERATIONS
           case 'create_user':
             result = await this.executeCreateUser(functionCall.arguments);
-            answer = `✅ User created successfully!\n\n**User Details:**\n- Name: ${result.name}\n- Email: ${result.email}\n- Role: ${result.role}\n- Team ID: ${result.teamId || 'N/A'}\n- User ID: ${result.id}`;
+            answer = this.formattingService.formatActionResult(
+              'create',
+              'user',
+              result,
+            );
             break;
 
           case 'update_user':
             result = await this.executeUpdateUser(functionCall.arguments);
-            answer = `✅ User updated successfully!\n\n**Updated User:**\n- Name: ${result.name}\n- Email: ${result.email}\n- Role: ${result.role || 'N/A'}\n- Team ID: ${result.teamId || 'N/A'}`;
+            answer = this.formattingService.formatActionResult(
+              'update',
+              'user',
+              result,
+            );
             break;
 
           case 'delete_user':
             result = await this.executeDeleteUser(functionCall.arguments);
-            answer = `✅ User deleted successfully! (User ID: ${functionCall.arguments.userId})`;
+            answer = this.formattingService.formatActionResult(
+              'delete',
+              'user',
+              { userId: functionCall.arguments.userId },
+            );
             break;
 
           // TEAM OPERATIONS
           case 'create_team':
             result = await this.executeCreateTeam(functionCall.arguments);
-            answer = `✅ Team created successfully!\n\n**Team Details:**\n- Name: ${result.name}\n- Project ID: ${result.projectId}\n- Owner ID: ${result.ownerId}\n- Team ID: ${result.id}`;
+            answer = this.formattingService.formatActionResult(
+              'create',
+              'team',
+              result,
+            );
             break;
 
           case 'update_team':
             result = await this.executeUpdateTeam(functionCall.arguments);
-            answer = `✅ Team updated successfully!\n\n**Updated Team:**\n- Name: ${result.name}\n- Project ID: ${result.projectId}\n- Owner ID: ${result.ownerId}`;
+            answer = this.formattingService.formatActionResult(
+              'update',
+              'team',
+              result,
+            );
             break;
 
           case 'delete_team':
             result = await this.executeDeleteTeam(functionCall.arguments);
-            answer = `✅ Team deleted successfully! (Team ID: ${functionCall.arguments.teamId})`;
+            answer = this.formattingService.formatActionResult(
+              'delete',
+              'team',
+              { teamId: functionCall.arguments.teamId },
+            );
             break;
 
           // PROJECT OPERATIONS
           case 'create_project':
             result = await this.executeCreateProject(functionCall.arguments);
-            answer = `✅ Project created successfully!\n\n**Project Details:**\n- Name: ${result.name}\n- Description: ${result.description || 'N/A'}\n- Project ID: ${result.id}`;
+            answer = this.formattingService.formatActionResult(
+              'create',
+              'project',
+              result,
+            );
             break;
 
           case 'update_project':
             result = await this.executeUpdateProject(functionCall.arguments);
-            answer = `✅ Project updated successfully!\n\n**Updated Project:**\n- Name: ${result.name}\n- Description: ${result.description || 'N/A'}`;
+            answer = this.formattingService.formatActionResult(
+              'update',
+              'project',
+              result,
+            );
             break;
 
           case 'delete_project':
             result = await this.executeDeleteProject(functionCall.arguments);
-            answer = `✅ Project deleted successfully! (Project ID: ${functionCall.arguments.projectId})`;
+            answer = this.formattingService.formatActionResult(
+              'delete',
+              'project',
+              { projectId: functionCall.arguments.projectId },
+            );
             break;
 
           default:
@@ -353,46 +390,73 @@ export class ActionExecutionService {
 
   /**
    * Retrieve relevant documents for action context
+   * ROOT FIX: FORCED multi-entity retrieval with intelligent limiting
+   * - CREATE/UPDATE actions ALWAYS retrieve users (for assignments)
+   * - Limit to top 5 per entity type (not 115 total)
+   * - Use semantic entity detection from classification
    */
   private async retrieveActionContext(
     query: string,
     intent: string,
+    classificationFilters?: { entity_types?: string[] },
   ): Promise<RetrievedDoc[]> {
     try {
-      // Determine entity type filter based on intent
-      const entityTypeMap: Record<string, string> = {
-        task_management: 'task',
-        user_info: 'user',
-        team_info: 'team',
-        project_info: 'project',
-      };
+      // ROOT FIX #1: Use LLM-extracted entity types from classification
+      let entityTypes: string[] = classificationFilters?.entity_types || [];
 
-      const filters: any = {};
-      if (entityTypeMap[intent]) {
-        filters.entity_type = entityTypeMap[intent];
+      // ROOT FIX #2: FORCE user retrieval for CREATE/UPDATE (assignment context)
+      const actionType = intent.split('_')[0]; // create, update, delete
+      const baseEntityType =
+        this.formattingService.getEntityTypeFromIntent(intent);
+
+      if (
+        (actionType === 'create' || actionType === 'update') &&
+        baseEntityType
+      ) {
+        // Always need BOTH base entity and users for assignments
+        if (!entityTypes.includes(baseEntityType)) {
+          entityTypes.push(baseEntityType);
+        }
+        if (!entityTypes.includes('user')) {
+          entityTypes.push('user'); // For "assign to X"
+        }
+        this.logger.log(
+          `🎯 Forced multi-entity: ${entityTypes.join(', ')} (create/update)`,
+        );
       }
 
-      // Search for relevant entities
-      const docs = await this.searchService.vectorSearch(query, filters);
-      return docs.slice(0, 5); // Top 5 most relevant
+      // Fallback if still empty
+      if (entityTypes.length === 0 && baseEntityType) {
+        entityTypes = [baseEntityType];
+      }
+
+      // ROOT FIX #3: PARALLEL retrieval with SMART LIMITING (top 5 per type)
+      if (entityTypes.length > 1) {
+        this.logger.log(`🔍 Multi-entity retrieval: ${entityTypes.join(', ')}`);
+
+        const searchPromises = entityTypes.map(async (type) => {
+          const docs = await this.searchService.vectorSearch(query, {
+            entity_type: type,
+          });
+          // LIMIT: Top 5 per type instead of 115 total
+          return docs.slice(0, 5);
+        });
+
+        const results = await Promise.all(searchPromises);
+        return results.flat(); // Merge all results
+      } else {
+        // Single entity type (original behavior)
+        const filters: any = {};
+        if (entityTypes.length === 1) {
+          filters.entity_type = entityTypes[0];
+        }
+        const docs = await this.searchService.vectorSearch(query, filters);
+        return docs.slice(0, 5);
+      }
     } catch (error) {
       this.logger.warn(`Retrieval failed: ${error.message}`);
       return [];
     }
-  }
-
-  /**
-   * Build context string from retrieved documents
-   */
-  private buildRetrievalContext(docs: RetrievedDoc[]): string {
-    if (docs.length === 0) return 'No matching entities found in database.';
-
-    return docs
-      .map((doc, i) => {
-        const id = doc.entityId || doc.metadata?.id || 'unknown';
-        return `[${i + 1}] ${doc.entityType.toUpperCase()}: ${doc.text}\n    ID: ${id}`;
-      })
-      .join('\n');
   }
 
   private async determineFunctionCall(
@@ -401,236 +465,124 @@ export class ActionExecutionService {
     history: ConversationHistory[],
     retrievedDocs: RetrievedDoc[],
   ): Promise<FunctionCall | null> {
-    // Build context from retrieved documents
-    const retrievalContext = this.buildRetrievalContext(retrievedDocs);
+    this.logger.debug(`\n${'='.repeat(60)}`);
+    this.logger.debug(`🔧 DETERMINE FUNCTION CALL`);
+    this.logger.debug(`${'='.repeat(60)}`);
+    this.logger.debug(`📥 INPUT - Query: "${query}"`);
+    this.logger.debug(
+      `📥 INPUT - Classification: ${JSON.stringify(classification)}`,
+    );
+    this.logger.debug(`📥 INPUT - History entries: ${history.length}`);
+    this.logger.debug(`📥 INPUT - Retrieved docs: ${retrievedDocs.length}`);
 
-    // Build compact history context (last 4 messages) - CRITICAL for follow-up queries
-    const recentHistory = history.slice(-4);
-    const historyContext = recentHistory.length
-      ? recentHistory
-          .map(
-            (h) => `[${h.role === 'user' ? 'USER' : 'ASSISTANT'}] ${h.content}`,
-          )
-          .join('\n')
-      : 'none';
+    // Log retrieved documents in detail
+    if (retrievedDocs.length > 0) {
+      this.logger.debug(`\n📄 RETRIEVED DOCUMENTS:`);
+      retrievedDocs.slice(0, 5).forEach((doc, i) => {
+        this.logger.debug(
+          `  [${i + 1}] Type: ${doc.entityType} | ID: ${doc.entityId}`,
+        );
+        this.logger.debug(`      Score: ${doc.score.toFixed(3)}`);
+        this.logger.debug(`      Text: "${doc.text.substring(0, 100)}..."`);
+      });
+      if (retrievedDocs.length > 5) {
+        this.logger.debug(
+          `  ... and ${retrievedDocs.length - 5} more documents`,
+        );
+      }
+    }
+
+    // Use centralized formatting for retrieval context and history
+    const retrievalContext =
+      this.formattingService.buildRetrievalContext(retrievedDocs);
+    const historyContext =
+      this.formattingService.formatHistoryDetailed(history, 10) || 'none';
 
     // Determine which function parameters are needed based on classification
-    const funcName = this.getFunctionName(classification);
+    const funcName = this.formattingService.formatFunctionName(classification);
     const funcDef = AVAILABLE_FUNCTIONS.find((f) => f.name === funcName);
-    const paramList = funcDef
-      ? Object.entries(funcDef.parameters)
-          .map(([k, v]) => `  ${k}: ${v}`)
-          .join('\n')
-      : '';
+
+    // DEBUG: Log function resolution
+    this.logger.debug(
+      `🔍 Classification: type="${classification.type}" intent="${classification.intent}"`,
+    );
+    this.logger.debug(`🔧 Resolved function: "${funcName}"`);
+
+    if (!funcDef) {
+      this.logger.error(`❌ No function definition found for: ${funcName}`);
+      this.logger.error(
+        `Available functions: ${AVAILABLE_FUNCTIONS.map((f) => f.name).join(', ')}`,
+      );
+      return null;
+    }
+
+    const paramList = Object.entries(funcDef.parameters)
+      .map(([k, v]) => `  ${k}: ${v}`)
+      .join('\n');
 
     // Get primary ID param name for the example
-    const primaryIdParam = funcDef
-      ? Object.keys(funcDef.parameters).find(
-          (k) => k.endsWith('Id') || k === 'title' || k === 'name',
-        )
-      : 'id';
+    const primaryIdParam =
+      Object.keys(funcDef.parameters).find(
+        (k) => k.endsWith('Id') || k === 'title' || k === 'name',
+      ) || 'id';
 
-    // CRITICAL FIX: Prompt must accumulate parameters from conversation history
-    const prompt = `ROLE: Extract function parameters by COMBINING information from HISTORY and CURRENT REQUEST.
+    this.logger.debug(
+      `📋 Expected parameters: ${Object.keys(funcDef.parameters).join(', ')}`,
+    );
+    this.logger.debug(`🔑 Primary param: ${primaryIdParam}`);
 
-FUNCTION: ${funcName}
-PARAMETERS:
-${paramList}
+    // Use centralized prompt
+    const prompt = buildExtractFunctionParamsPrompt(
+      funcName,
+      paramList,
+      retrievalContext,
+      historyContext,
+      query,
+      primaryIdParam || 'id',
+    );
 
-DATABASE ENTITIES (use these IDs!):
-${retrievalContext}
-
-CONVERSATION HISTORY (extract missing parameters from here!):
-${historyContext}
-
-CURRENT REQUEST: "${query}"
-
-CRITICAL INSTRUCTIONS:
-1. ACCUMULATE parameters from BOTH the history AND the current request
-2. If user previously mentioned a name like "mohamed tarek" and now provides email, COMBINE BOTH
-3. If assistant asked for missing info and user now provides it, MERGE with previous values
-4. Find matching entities in DATABASE ENTITIES and use their UUIDs
-5. Use EXACT parameter names from PARAMETERS list
-
-EXAMPLES:
-- History: [USER] "create user john" [ASSISTANT] "need email" 
-  Current: "his email is john@test.com"
-  → {"name":"john","email":"john@test.com"}
-
-- History: [USER] "create task 'Fix bug'" [ASSISTANT] "who to assign?"
-  Current: "assign it to Bob"
-  → {"title":"Fix bug","assignedTo":"<bob-uuid>"}
-
-OUTPUT (JSON only, combine ALL extracted parameters):
-{"name":"${funcName}","arguments":{"${primaryIdParam}":"<extracted-value>"}}`;
+    this.logger.debug(`\n📤 LLM PROMPT (${prompt.length} chars):`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(
+      prompt.substring(0, 500) +
+        (prompt.length > 500 ? '\n... (truncated)' : ''),
+    );
+    this.logger.debug(`${'-'.repeat(60)}`);
 
     try {
-      const response = await this.cachedLLMCall(
+      const response = await this.llmCacheService.cachedCallWithModel(
         prompt,
-        this.ollamaService.getFastLlmModel(),
+        this.llmCacheService.getFastModel(),
         { temperature: 0.1 },
       );
 
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        this.logger.warn('No JSON in LLM response');
+      this.logger.debug(`\n📨 LLM RESPONSE:`);
+      this.logger.debug(`${'-'.repeat(60)}`);
+      this.logger.debug(response);
+      this.logger.debug(`${'-'.repeat(60)}`);
+
+      // Use centralized JSON extraction
+      const parsed = this.formattingService.extractJsonFromResponse(response);
+      if (!parsed) {
+        this.logger.warn('❌ No JSON in LLM response');
         return null;
       }
 
-      return JSON.parse(jsonMatch[0]);
+      this.logger.debug(`\n📦 PARSED FUNCTION CALL:`);
+      this.logger.debug(`  Function: ${parsed.name}`);
+      this.logger.debug(
+        `  Arguments: ${JSON.stringify(parsed.arguments, null, 2)}`,
+      );
+      this.logger.debug(`${'='.repeat(60)}\n`);
+
+      return parsed;
     } catch (error) {
-      this.logger.error(`Function call failed: ${error.message}`);
+      this.logger.error(`❌ Function call failed: ${error.message}`);
       return null;
     }
-  }
-
-  /**
-   * Map classification to function name
-   */
-  private getFunctionName(classification: {
-    type: string;
-    intent: string;
-  }): string {
-    const intentToEntity: Record<string, string> = {
-      task_management: 'task',
-      user_info: 'user',
-      team_info: 'team',
-      project_info: 'project',
-    };
-    const entity = intentToEntity[classification.intent] || 'task';
-    return `${classification.type}_${entity}`;
   }
 
   // ===== CRUD EXECUTION METHODS =====
-
-  // ===== ENTITY RESOLUTION HELPERS =====
-  /**
-   * Resolve user by name or ID. Returns user ID if found.
-   * Searches case-insensitive by name if input is not a UUID.
-   */
-  private async resolveUserId(nameOrId: string): Promise<string | null> {
-    if (!nameOrId) return null;
-
-    const trimmed = nameOrId.trim();
-
-    // Check if it's already a UUID (contains hyphens and hex chars)
-    const uuidPattern =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (uuidPattern.test(trimmed)) {
-      // Already a UUID, verify it exists
-      try {
-        await this.usersService.findOne(trimmed);
-        return trimmed;
-      } catch {
-        return null;
-      }
-    }
-
-    // Search by name (case-insensitive)
-    try {
-      const users = await this.usersService.findAll();
-      const user = users.find(
-        (u) => u.name.toLowerCase() === trimmed.toLowerCase(),
-      );
-      return user ? user.id : null;
-    } catch (error) {
-      this.logger.error(`Failed to resolve user: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * Resolve team by name or ID. Returns team ID if found.
-   */
-  private async resolveTeamId(nameOrId: string): Promise<string | null> {
-    if (!nameOrId) return null;
-
-    const trimmed = nameOrId.trim();
-
-    const uuidPattern =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (uuidPattern.test(trimmed)) {
-      try {
-        await this.teamsService.findOne(trimmed);
-        return trimmed;
-      } catch {
-        return null;
-      }
-    }
-
-    try {
-      const teams = await this.teamsService.findAll();
-      const team = teams.find(
-        (t) => t.name.toLowerCase() === trimmed.toLowerCase(),
-      );
-      return team ? team.id : null;
-    } catch (error) {
-      this.logger.error(`Failed to resolve team: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * Resolve project by name or ID. Returns project ID if found.
-   */
-  private async resolveProjectId(nameOrId: string): Promise<string | null> {
-    if (!nameOrId) return null;
-
-    const trimmed = nameOrId.trim();
-
-    const uuidPattern =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (uuidPattern.test(trimmed)) {
-      try {
-        await this.projectsService.findOne(trimmed);
-        return trimmed;
-      } catch {
-        return null;
-      }
-    }
-
-    try {
-      const projects = await this.projectsService.findAll();
-      const project = projects.find(
-        (p) => p.name.toLowerCase() === trimmed.toLowerCase(),
-      );
-      return project ? project.id : null;
-    } catch (error) {
-      this.logger.error(`Failed to resolve project: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * Resolve task by title or ID. Returns task ID if found.
-   */
-  private async resolveTaskId(titleOrId: string): Promise<string | null> {
-    if (!titleOrId) return null;
-
-    const trimmed = titleOrId.trim();
-
-    const uuidPattern =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (uuidPattern.test(trimmed)) {
-      try {
-        await this.tasksService.findOne(trimmed);
-        return trimmed;
-      } catch {
-        return null;
-      }
-    }
-
-    try {
-      const tasks = await this.tasksService.findAll();
-      const task = tasks.find(
-        (t) => t.title.toLowerCase() === trimmed.toLowerCase(),
-      );
-      return task ? task.id : null;
-    } catch (error) {
-      this.logger.error(`Failed to resolve task: ${error.message}`);
-      return null;
-    }
-  }
 
   // ----- TASK OPERATIONS -----
   private async executeCreateTask(args: any): Promise<any> {
@@ -640,11 +592,12 @@ OUTPUT (JSON only, combine ALL extracted parameters):
         throw new Error('Please provide a title for the task.');
       }
 
-      // ===== SMART USER RESOLUTION =====
-      // Resolve user name to ID (accepts both name and UUID) - assignedTo is now optional
+      // ===== SMART USER RESOLUTION - Using centralized service =====
       let resolvedUserId: string | undefined = undefined;
       if (args.assignedTo) {
-        const userId = await this.resolveUserId(args.assignedTo);
+        const userId = await this.entityResolutionService.resolveUserId(
+          args.assignedTo,
+        );
         if (!userId) {
           throw new Error(
             `User "${args.assignedTo}" not found. Please make sure the user exists in the system.`,
@@ -678,6 +631,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       };
 
       const task = await this.tasksService.create(taskData as any);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.indexTask(task.id);
+        this.logger.debug(`📊 Indexed new task: ${task.id}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to index task: ${indexError.message}`);
+      }
+
       return task;
     } catch (error) {
       throw new Error(`Failed to create task: ${error.message}`);
@@ -691,7 +653,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve task title/ID to actual ID
-      const resolvedTaskId = await this.resolveTaskId(args.taskId);
+      const resolvedTaskId = await this.entityResolutionService.resolveTaskId(
+        args.taskId,
+      );
       if (!resolvedTaskId) {
         throw new Error(
           `Task "${args.taskId}" not found. Please make sure the task exists.`,
@@ -704,7 +668,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
 
       // ===== SMART USER RESOLUTION FOR REASSIGNMENT =====
       if (args.assignedTo) {
-        const resolvedUserId = await this.resolveUserId(args.assignedTo);
+        const resolvedUserId = await this.entityResolutionService.resolveUserId(
+          args.assignedTo,
+        );
         if (!resolvedUserId) {
           throw new Error(
             `User "${args.assignedTo}" not found. Please make sure the user exists in the system.`,
@@ -731,6 +697,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       const task = await this.tasksService.update(resolvedTaskId, updateData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.reindexEntity('task', resolvedTaskId);
+        this.logger.debug(`📊 Reindexed task: ${resolvedTaskId}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to reindex task: ${indexError.message}`);
+      }
+
       return task;
     } catch (error) {
       throw new Error(`Failed to update task: ${error.message}`);
@@ -744,7 +719,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve task title/ID to actual ID
-      const resolvedTaskId = await this.resolveTaskId(args.taskId);
+      const resolvedTaskId = await this.entityResolutionService.resolveTaskId(
+        args.taskId,
+      );
       if (!resolvedTaskId) {
         throw new Error(
           `Task "${args.taskId}" not found. Please make sure the task exists.`,
@@ -752,6 +729,17 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       await this.tasksService.remove(resolvedTaskId);
+
+      // ROOT FIX: Remove from vector index
+      try {
+        await this.indexingService.deleteFromIndex('task', resolvedTaskId);
+        this.logger.debug(`📊 Removed task from index: ${resolvedTaskId}`);
+      } catch (indexError) {
+        this.logger.warn(
+          `Failed to remove task from index: ${indexError.message}`,
+        );
+      }
+
       return { deleted: true, taskId: resolvedTaskId };
     } catch (error) {
       throw new Error(`Failed to delete task: ${error.message}`);
@@ -777,7 +765,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       // Resolve team by name if provided
       let resolvedTeamId: string | undefined = undefined;
       if (args.teamId) {
-        const teamId = await this.resolveTeamId(args.teamId);
+        const teamId = await this.entityResolutionService.resolveTeamId(
+          args.teamId,
+        );
         if (!teamId) {
           throw new Error(
             `Team "${args.teamId}" not found. Please make sure the team exists.`,
@@ -795,6 +785,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       };
 
       const user = await this.usersService.create(userData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.indexUser(user.id);
+        this.logger.debug(`📊 Indexed new user: ${user.id}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to index user: ${indexError.message}`);
+      }
+
       return user;
     } catch (error) {
       throw new Error(`Failed to create user: ${error.message}`);
@@ -808,7 +807,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve user name/ID to actual ID
-      const resolvedUserId = await this.resolveUserId(args.userId);
+      const resolvedUserId = await this.entityResolutionService.resolveUserId(
+        args.userId,
+      );
       if (!resolvedUserId) {
         throw new Error(
           `User "${args.userId}" not found. Please make sure the user exists.`,
@@ -823,7 +824,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
 
       // Resolve team by name if provided
       if (args.teamId) {
-        const resolvedTeamId = await this.resolveTeamId(args.teamId);
+        const resolvedTeamId = await this.entityResolutionService.resolveTeamId(
+          args.teamId,
+        );
         if (!resolvedTeamId) {
           throw new Error(
             `Team "${args.teamId}" not found. Please make sure the team exists.`,
@@ -833,6 +836,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       const user = await this.usersService.update(resolvedUserId, updateData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.reindexEntity('user', resolvedUserId);
+        this.logger.debug(`📊 Reindexed user: ${resolvedUserId}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to reindex user: ${indexError.message}`);
+      }
+
       return user;
     } catch (error) {
       throw new Error(`Failed to update user: ${error.message}`);
@@ -846,7 +858,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve user name/ID to actual ID
-      const resolvedUserId = await this.resolveUserId(args.userId);
+      const resolvedUserId = await this.entityResolutionService.resolveUserId(
+        args.userId,
+      );
       if (!resolvedUserId) {
         throw new Error(
           `User "${args.userId}" not found. Please make sure the user exists.`,
@@ -854,6 +868,17 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       await this.usersService.remove(resolvedUserId);
+
+      // ROOT FIX: Remove from vector index
+      try {
+        await this.indexingService.deleteFromIndex('user', resolvedUserId);
+        this.logger.debug(`📊 Removed user from index: ${resolvedUserId}`);
+      } catch (indexError) {
+        this.logger.warn(
+          `Failed to remove user from index: ${indexError.message}`,
+        );
+      }
+
       return { deleted: true, userId: resolvedUserId };
     } catch (error) {
       throw new Error(`Failed to delete user: ${error.message}`);
@@ -874,7 +899,8 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve project by name if not UUID
-      const resolvedProjectId = await this.resolveProjectId(args.projectId);
+      const resolvedProjectId =
+        await this.entityResolutionService.resolveProjectId(args.projectId);
       if (!resolvedProjectId) {
         throw new Error(
           `Project "${args.projectId}" not found. Please make sure the project exists.`,
@@ -882,7 +908,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve owner by name if not UUID
-      const resolvedOwnerId = await this.resolveUserId(args.ownerId);
+      const resolvedOwnerId = await this.entityResolutionService.resolveUserId(
+        args.ownerId,
+      );
       if (!resolvedOwnerId) {
         throw new Error(
           `User "${args.ownerId}" not found. Please make sure the user exists.`,
@@ -896,6 +924,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       };
 
       const team = await this.teamsService.create(teamData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.indexTeam(team.id);
+        this.logger.debug(`📊 Indexed new team: ${team.id}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to index team: ${indexError.message}`);
+      }
+
       return team;
     } catch (error) {
       throw new Error(`Failed to create team: ${error.message}`);
@@ -909,7 +946,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve team name/ID to actual ID
-      const resolvedTeamId = await this.resolveTeamId(args.teamId);
+      const resolvedTeamId = await this.entityResolutionService.resolveTeamId(
+        args.teamId,
+      );
       if (!resolvedTeamId) {
         throw new Error(
           `Team "${args.teamId}" not found. Please make sure the team exists.`,
@@ -921,7 +960,8 @@ OUTPUT (JSON only, combine ALL extracted parameters):
 
       // Resolve project by name if provided
       if (args.projectId) {
-        const resolvedProjectId = await this.resolveProjectId(args.projectId);
+        const resolvedProjectId =
+          await this.entityResolutionService.resolveProjectId(args.projectId);
         if (!resolvedProjectId) {
           throw new Error(
             `Project "${args.projectId}" not found. Please make sure the project exists.`,
@@ -932,7 +972,8 @@ OUTPUT (JSON only, combine ALL extracted parameters):
 
       // Resolve owner by name if provided
       if (args.ownerId) {
-        const resolvedOwnerId = await this.resolveUserId(args.ownerId);
+        const resolvedOwnerId =
+          await this.entityResolutionService.resolveUserId(args.ownerId);
         if (!resolvedOwnerId) {
           throw new Error(
             `User "${args.ownerId}" not found. Please make sure the user exists.`,
@@ -942,6 +983,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       const team = await this.teamsService.update(resolvedTeamId, updateData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.reindexEntity('team', resolvedTeamId);
+        this.logger.debug(`📊 Reindexed team: ${resolvedTeamId}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to reindex team: ${indexError.message}`);
+      }
+
       return team;
     } catch (error) {
       throw new Error(`Failed to update team: ${error.message}`);
@@ -955,7 +1005,9 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve team name/ID to actual ID
-      const resolvedTeamId = await this.resolveTeamId(args.teamId);
+      const resolvedTeamId = await this.entityResolutionService.resolveTeamId(
+        args.teamId,
+      );
       if (!resolvedTeamId) {
         throw new Error(
           `Team "${args.teamId}" not found. Please make sure the team exists in the system.`,
@@ -963,6 +1015,17 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       await this.teamsService.remove(resolvedTeamId);
+
+      // ROOT FIX: Remove from vector index
+      try {
+        await this.indexingService.deleteFromIndex('team', resolvedTeamId);
+        this.logger.debug(`📊 Removed team from index: ${resolvedTeamId}`);
+      } catch (indexError) {
+        this.logger.warn(
+          `Failed to remove team from index: ${indexError.message}`,
+        );
+      }
+
       return { deleted: true, teamId: resolvedTeamId };
     } catch (error) {
       throw new Error(`Failed to delete team: ${error.message}`);
@@ -981,6 +1044,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       };
 
       const project = await this.projectsService.create(projectData);
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.indexProject(project.id);
+        this.logger.debug(`📊 Indexed new project: ${project.id}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to index project: ${indexError.message}`);
+      }
+
       return project;
     } catch (error) {
       throw new Error(`Failed to create project: ${error.message}`);
@@ -994,7 +1066,8 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve project name/ID to actual ID
-      const resolvedProjectId = await this.resolveProjectId(args.projectId);
+      const resolvedProjectId =
+        await this.entityResolutionService.resolveProjectId(args.projectId);
       if (!resolvedProjectId) {
         throw new Error(
           `Project "${args.projectId}" not found. Please make sure the project exists.`,
@@ -1009,6 +1082,15 @@ OUTPUT (JSON only, combine ALL extracted parameters):
         resolvedProjectId,
         updateData,
       );
+
+      // ROOT FIX: Update vector index immediately
+      try {
+        await this.indexingService.reindexEntity('project', resolvedProjectId);
+        this.logger.debug(`📊 Reindexed project: ${resolvedProjectId}`);
+      } catch (indexError) {
+        this.logger.warn(`Failed to reindex project: ${indexError.message}`);
+      }
+
       return project;
     } catch (error) {
       throw new Error(`Failed to update project: ${error.message}`);
@@ -1022,7 +1104,8 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       // Resolve project name/ID to actual ID
-      const resolvedProjectId = await this.resolveProjectId(args.projectId);
+      const resolvedProjectId =
+        await this.entityResolutionService.resolveProjectId(args.projectId);
       if (!resolvedProjectId) {
         throw new Error(
           `Project "${args.projectId}" not found. Please make sure the project exists.`,
@@ -1030,6 +1113,22 @@ OUTPUT (JSON only, combine ALL extracted parameters):
       }
 
       await this.projectsService.remove(resolvedProjectId);
+
+      // ROOT FIX: Remove from vector index
+      try {
+        await this.indexingService.deleteFromIndex(
+          'project',
+          resolvedProjectId,
+        );
+        this.logger.debug(
+          `📊 Removed project from index: ${resolvedProjectId}`,
+        );
+      } catch (indexError) {
+        this.logger.warn(
+          `Failed to remove project from index: ${indexError.message}`,
+        );
+      }
+
       return { deleted: true, projectId: resolvedProjectId };
     } catch (error) {
       throw new Error(`Failed to delete project: ${error.message}`);

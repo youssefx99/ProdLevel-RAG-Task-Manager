@@ -18,26 +18,35 @@ export class EmbeddingsService {
    * Generate embedding for a single text
    */
   async generateEmbedding(text: string): Promise<number[]> {
+    this.logger.debug(
+      `🔢 Generating embedding for text: "${text.substring(0, 50)}..."`,
+    );
     // Preprocess text
     const processedText = this.preprocessText(text);
+    this.logger.debug(
+      `📏 Processed text length: ${processedText.length} chars`,
+    );
 
     // Check cache first
     const cacheKey = this.generateCacheKey(processedText);
     const cachedEmbedding = this.getCachedEmbedding(cacheKey);
 
     if (cachedEmbedding) {
-      this.logger.debug('Using cached embedding');
+      this.logger.debug('✅ Using cached embedding');
       return cachedEmbedding;
     }
 
     // Generate new embedding
+    this.logger.debug('🔄 Calling embedding model...');
     const embedding = await this.ollamaService.generateEmbedding(processedText);
 
     // Validate embedding
     if (!this.validateEmbedding(embedding)) {
+      this.logger.error('❌ Generated embedding failed validation');
       throw new Error('Generated embedding failed validation');
     }
 
+    this.logger.debug(`✅ Embedding generated: ${embedding.length} dimensions`);
     // Cache the result
     this.cacheEmbedding(cacheKey, embedding);
 

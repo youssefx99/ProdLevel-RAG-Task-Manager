@@ -16,6 +16,7 @@ export class ConversationService {
   constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {}
 
   async getHistory(sessionId: string): Promise<ConversationHistory[]> {
+    this.logger.debug(`📖 Retrieving history for session: ${sessionId}`);
     // Check Redis cache first for fast retrieval
     const cacheKey = `history:${sessionId}`;
 
@@ -34,6 +35,9 @@ export class ConversationService {
 
     // Fallback to in-memory map
     const history = this.conversations.get(sessionId) || [];
+    this.logger.debug(
+      `📋 Retrieved ${history.length} history entries for session`,
+    );
 
     // Cache it for next time if not empty
     if (history.length > 0) {
@@ -52,7 +56,9 @@ export class ConversationService {
     role: 'user' | 'assistant',
     content: string,
   ): Promise<void> {
+    this.logger.debug(`📝 Adding ${role} message to session: ${sessionId}`);
     if (!this.conversations.has(sessionId)) {
+      this.logger.debug(`🆕 Creating new conversation session`);
       this.conversations.set(sessionId, []);
     }
 

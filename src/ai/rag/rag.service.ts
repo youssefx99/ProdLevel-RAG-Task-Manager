@@ -125,7 +125,7 @@ export class RagService {
       steps.push('history_management');
       this.logger.log(`├─ History: ${history.length} messages`);
 
-      // Step 1.2 & 1.3: Query Classification + Conditional Reformulation (Parallel)
+      // Step 1.2: Query Classification
       steps.push('query_classification');
       const classification =
         await this.intentClassificationService.classifyQuery(
@@ -135,9 +135,21 @@ export class RagService {
       this.logger.log(`├─ Classification: ${classification.type}`);
       this.logger.log(`├─ Intent: ${classification.intent}`);
 
+      // Step 1.3: Metadata Filter Extraction (LLM-based entity detection)
+      steps.push('metadata_extraction');
+      const filters = await this.intentClassificationService.extractFilters(
+        request.query,
+        history,
+        classification.type,
+        classification.intent,
+      );
+      this.logger.log(
+        `└─ Smart Filters (type=${classification.type}): ${JSON.stringify(filters)}\n`,
+      );
+
       // ===== SPECIAL ROUTING: Handle different intent types =====
 
-      // ROUTE 1: Actions (create/update/delete) → Function Calling
+      // ROUTE 1: Actions (create/update/delete) → Function Calling WITH RETRIEVAL
       if (
         classification.type === 'create' ||
         classification.type === 'update' ||
@@ -146,10 +158,20 @@ export class RagService {
         this.logger.log(
           `\n🔧 ACTION DETECTED: ${classification.type.toUpperCase()}`,
         );
+        // Actions don't need reformulation - just direct entity lookup
+        this.logger.log('├─ Skipping reformulation for action query');
+        this.logger.log('├─ Direct retrieval for entity resolution...');
+        const actionDocs = await this.searchService.executeHybridSearch(
+          [request.query], // Use original query only, no reformulation
+          filters,
+        );
+
         const actionResult = await this.actionExecutionService.executeAction(
           request.query,
           classification,
           sessionId,
+          actionDocs, // Pass retrieved docs for entity resolution
+          filters, // Pass filters for entity_types
         );
 
         // Update history
@@ -195,39 +217,39 @@ export class RagService {
         // These will use specialized metadata filters in extractFilters()
       }
 
-      // ROUTE 3: Continue with normal RAG pipeline for search/question/list/status/analysis queries
+      // ROUTE 3: Normal RAG pipeline for search/question/list/status/analysis queries
+      // NOW do reformulation (only for retrieval-heavy queries)
+      this.logger.log(
+        `\n🔍 RETRIEVAL QUERY: ${classification.type.toUpperCase()}`,
+      );
 
-      // Skip reformulation for simple queries
       let reformulatedQueries: string[];
-      const isComplexQuery = request.query.length > 30 || history.length > 0;
 
-      if (isComplexQuery) {
+      // Always reformulate for question/search types OR complex queries
+      const needsReformulation =
+        classification.type === 'question' ||
+        classification.type === 'search' ||
+        request.query.length > 50 ||
+        history.length > 0;
+
+      if (needsReformulation) {
         steps.push('query_reformulation');
-        reformulatedQueries = this.intentClassificationService.reformulateQuery(
-          request.query,
-          history,
-        );
+        this.logger.log('├─ Query reformulation for better retrieval...');
+        reformulatedQueries =
+          await this.intentClassificationService.reformulateQuery(
+            request.query,
+            history,
+          );
         this.logger.log(
-          `├─ Reformulated queries: ${reformulatedQueries.length}`,
+          `├─ Generated ${reformulatedQueries.length} search variations`,
         );
         reformulatedQueries.forEach((q, i) =>
           this.logger.log(`│  ${i + 1}. ${q}`),
         );
       } else {
         reformulatedQueries = [request.query];
-        this.logger.log(`├─ Simple query - skipping reformulation`);
+        this.logger.log(`├─ Simple query - using original only`);
       }
-
-      // Step 1.4: Metadata Filter Extraction (AI extracts filters from query)
-      steps.push('metadata_extraction');
-      const filters = this.intentClassificationService.extractFilters(
-        request.query,
-        classification.type,
-        classification.intent,
-      );
-      this.logger.log(
-        `└─ Smart Filters (type=${classification.type}): ${JSON.stringify(filters)}\n`,
-      );
 
       // SMART SHORTCUT: Check if this is a simple exact match query
       const isSimpleQuery = this.isSimpleExactMatch(request.query);
@@ -406,14 +428,14 @@ export class RagService {
               history,
             );
 
-          // Reformulation (conditional)
+          // LLM-based reformulation (ALWAYS for streaming too)
           const isComplexQuery =
             request.query.length > 30 || history.length > 0;
           let reformulatedQueries: string[];
 
           if (isComplexQuery) {
             reformulatedQueries =
-              this.intentClassificationService.reformulateQuery(
+              await this.intentClassificationService.reformulateQuery(
                 request.query,
                 history,
               );
@@ -421,9 +443,12 @@ export class RagService {
             reformulatedQueries = [request.query];
           }
 
-          // Extract filters
-          const filters = this.intentClassificationService.extractFilters(
+          // Extract filters (with history for context)
+          const filters = await this.intentClassificationService.extractFilters(
             request.query,
+            history,
+            classification.type,
+            classification.intent,
           );
 
           // Search

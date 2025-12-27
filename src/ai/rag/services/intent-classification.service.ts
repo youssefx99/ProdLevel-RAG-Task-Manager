@@ -1,9 +1,13 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
-import * as crypto from 'crypto';
-import { OllamaService } from '../../llm/ollama.service';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConversationHistory } from './conversation.service';
+import { LLMCacheService } from './llm-cache.service';
+import { FormattingService } from './formatting.service';
+import { EntityExtractionService } from './entity-extraction.service';
+import {
+  buildQuickIntentPrompt,
+  buildClassifyQueryPrompt,
+  buildReformulateQueryPrompt,
+} from '../../prompts';
 
 @Injectable()
 export class IntentClassificationService {
@@ -35,37 +39,10 @@ export class IntentClassificationService {
   ];
 
   constructor(
-    private readonly ollamaService: OllamaService,
-    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly llmCacheService: LLMCacheService,
+    private readonly formattingService: FormattingService,
+    private readonly entityExtractionService: EntityExtractionService,
   ) {}
-
-  // ===== CACHED LLM WRAPPER (10x FASTER FOR REPEATED CALLS) =====
-  private async cachedLLMCall(
-    prompt: string,
-    model?: string,
-    options?: { temperature?: number; system?: string },
-  ): Promise<string> {
-    const cacheKey = `llm:${crypto
-      .createHash('md5')
-      .update(prompt + (model || '') + JSON.stringify(options || {}))
-      .digest('hex')}`;
-
-    const cached = await this.cacheManager.get<string>(cacheKey);
-    if (cached) {
-      this.logger.debug(
-        `⚡ LLM CACHE HIT for prompt: ${prompt.substring(0, 50)}...`,
-      );
-      return cached;
-    }
-
-    const result = await this.ollamaService.generateCompletion(
-      prompt,
-      model,
-      options,
-    );
-    await this.cacheManager.set(cacheKey, result, 600000); // Cache for 10 minutes
-    return result;
-  }
 
   // ===== QUICK INTENT DETECTION (Greeting/Goodbye/Thank) =====
   async detectQuickIntent(
@@ -102,12 +79,11 @@ export class IntentClassificationService {
 
     // For ambiguous cases, use minimal LLM call
     if (lower.length < 50 && !/create|update|delete|add|remove/i.test(lower)) {
-      const prompt = `Classify: "${query}"
-Output ONE word: greeting|goodbye|thank|none`;
+      const prompt = buildQuickIntentPrompt(query);
 
       try {
-        const result = await this.cachedLLMCall(prompt, undefined, {
-          temperature: 0,
+        const result = await this.llmCacheService.cachedCall(prompt, {
+          temperature: 0.1,
         });
         const type = result.trim().toLowerCase() as
           | 'greeting'
@@ -144,54 +120,35 @@ Output ONE word: greeting|goodbye|thank|none`;
     query: string,
     history: ConversationHistory[],
   ): Promise<{ type: string; intent: string }> {
-    // Build compact history context
-    const recentHistory = history.slice(-3);
-    const historyContext = recentHistory.length
-      ? recentHistory
-          .map((h) => `[${h.role[0].toUpperCase()}] ${h.content}`)
-          .join('\n')
-      : '';
+    this.logger.debug(`\n${'='.repeat(60)}`);
+    this.logger.debug(`🎯 QUERY CLASSIFICATION`);
+    this.logger.debug(`${'='.repeat(60)}`);
+    this.logger.debug(`📥 INPUT - Query: "${query}"`);
+    this.logger.debug(`📥 INPUT - History entries: ${history.length}`);
 
-    // IMPROVED PROMPT: Distinguishes questions vs commands + handles assignments
-    const prompt = `Classify the user's INTENT.
+    // Use centralized formatting for history
+    const historyContext = this.formattingService.formatHistoryCompact(
+      history,
+      10,
+    );
 
-${historyContext ? `HISTORY:\n${historyContext}\n` : ''}MSG: "${query}"
+    // Use centralized prompt
+    const prompt = buildClassifyQueryPrompt(query, historyContext);
 
-CRITICAL DISTINCTION:
-- COMMAND = User wants to DO something NOW ("delete X", "create a task", "assign X to Y")
-- QUESTION = User is ASKING about something ("when was X created?", "who created X?")
-
-TYPES:
-- delete: COMMAND to remove entity ("delete user John", "remove this task")
-- create: COMMAND to make new entity ("create a task", "add new user")  
-- update: COMMAND to modify entity ("update task status", "change user email", "ASSIGN X to Y", "reassign task")
-- question: QUESTION about entities ("when was user created?", "who made this?", "what is X?")
-- search: Finding specific entity ("find user John", "show task #5")
-- list: Show multiple entities ("list all users", "show tasks")
-- statistics: Counts/numbers ("how many tasks?", "total users")
-
-CRITICAL: "assign" = UPDATE operation!
-- "assign task to John" → type: update
-- "assign user to team" → type: update  
-- "reassign project" → type: update
-
-EXAMPLES:
-- "when was seleman created?" → type: question (asking ABOUT creation time)
-- "create user seleman" → type: create (COMMAND to create)
-- "assign task to John" → type: update (COMMAND to update assignedTo)
-- "delete the project" → type: delete (COMMAND)
-- "who deleted the task?" → type: question (asking ABOUT deletion)
-
-INTENT: task_management|user_info|team_info|project_info|general
-
-Output:
-type: [type]
-intent: [intent]`;
+    this.logger.debug(`\n📤 LLM PROMPT:`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(prompt);
+    this.logger.debug(`${'-'.repeat(60)}`);
 
     try {
-      const response = await this.cachedLLMCall(prompt, undefined, {
-        temperature: 0.1,
+      const response = await this.llmCacheService.cachedCall(prompt, {
+        temperature: 0.2,
       });
+
+      this.logger.debug(`\n📨 LLM RESPONSE:`);
+      this.logger.debug(`${'-'.repeat(60)}`);
+      this.logger.debug(response);
+      this.logger.debug(`${'-'.repeat(60)}`);
 
       // Parse response
       const typeMatch = response.match(/type:\s*(\w+)/i);
@@ -200,44 +157,123 @@ intent: [intent]`;
       const type = typeMatch ? typeMatch[1].toLowerCase() : 'question';
       const intent = intentMatch ? intentMatch[1].toLowerCase() : 'general';
 
-      this.logger.debug(`LLM Classification: type=${type}, intent=${intent}`);
+      this.logger.debug(`\n📦 PARSED OUTPUT:`);
+      this.logger.debug(`   Type: "${type}"`);
+      this.logger.debug(`   Intent: "${intent}"`);
+      this.logger.debug(`${'='.repeat(60)}\n`);
 
       return { type, intent };
     } catch (error) {
       this.logger.error(`❌ Classification failed: ${error.message}`);
+      this.logger.debug(`${'='.repeat(60)}\n`);
       // Simplest fallback - treat as question
       return { type: 'question', intent: 'general' };
     }
   }
 
-  reformulateQuery(query: string, history: ConversationHistory[]): string[] {
-    const queries = [query];
-    const lowerQuery = query.toLowerCase();
+  /**
+   * LLM-based query reformulation with keyword extraction
+   * Generates 3-5 focused search queries for better retrieval
+   */
+  async reformulateQuery(
+    query: string,
+    history: ConversationHistory[],
+  ): Promise<string[]> {
+    this.logger.debug(`\n${'='.repeat(60)}`);
+    this.logger.debug(`🔄 QUERY REFORMULATION`);
+    this.logger.debug(`${'='.repeat(60)}`);
+    this.logger.debug(`📥 INPUT - Query: "${query}"`);
+    this.logger.debug(`📥 INPUT - History entries: ${history.length}`);
 
-    // Add contextual reformulation if history exists
-    if (history.length > 0) {
-      const lastMessage = history[history.length - 1];
-      if (lastMessage.role === 'assistant') {
-        queries.push(`${lastMessage.content} ${query}`);
+    // Always include original query first
+    const queries = [query];
+
+    // For simple queries (< 15 chars), skip LLM reformulation
+    if (query.length < 15) {
+      this.logger.debug(
+        `⚠️ Query too short (${query.length} chars), skipping reformulation`,
+      );
+      this.logger.debug(`📤 OUTPUT - Queries: ["${query}"]`);
+      this.logger.debug(`${'='.repeat(60)}\n`);
+      return queries;
+    }
+
+    // Build history context
+    const historyContext = this.formattingService.formatHistoryCompact(
+      history,
+      3,
+    );
+
+    // Use centralized prompt
+    const prompt = buildReformulateQueryPrompt(query, historyContext);
+
+    this.logger.debug(`\n📤 LLM PROMPT:`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(
+      prompt.substring(0, 400) +
+        (prompt.length > 400 ? '\n... (truncated)' : ''),
+    );
+    this.logger.debug(`${'-'.repeat(60)}`);
+
+    try {
+      const response = await this.llmCacheService.cachedCall(prompt, {
+        temperature: 0.3,
+      });
+
+      this.logger.debug(`\n📨 LLM RESPONSE:`);
+      this.logger.debug(`${'-'.repeat(60)}`);
+      this.logger.debug(response);
+      this.logger.debug(`${'-'.repeat(60)}`);
+
+      // Parse LLM response - extract lines
+      const variations = response
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(
+          (line) =>
+            line.length > 0 &&
+            line.length < 100 &&
+            !line.match(/^(output|input|example|task|rules):/i),
+        )
+        .slice(0, 4); // Max 4 variations
+
+      if (variations.length > 0) {
+        queries.push(...variations);
+        this.logger.debug(`\n✅ Generated ${variations.length} variations:`);
+        variations.forEach((v, i) => this.logger.debug(`   ${i + 1}. "${v}"`));
+      }
+    } catch (error) {
+      this.logger.warn(`Reformulation failed: ${error.message}, using basic`);
+      // Fallback to basic reformulation
+      const lowerQuery = query.toLowerCase();
+      if (lowerQuery.includes('task')) {
+        queries.push(`tasks ${query}`);
+      } else if (lowerQuery.includes('team')) {
+        queries.push(`team ${query}`);
+      } else if (lowerQuery.includes('project')) {
+        queries.push(`project ${query}`);
       }
     }
 
-    // Add entity-specific reformulations based on query keywords
-    if (lowerQuery.includes('task')) {
-      queries.push(`tasks related to: ${query}`);
-    } else if (lowerQuery.includes('team')) {
-      queries.push(`team information: ${query}`);
-    } else if (lowerQuery.includes('project')) {
-      queries.push(`project details: ${query}`);
-    }
+    const finalQueries = queries.slice(0, 5); // Max 5 total (original + 4 variations)
+    this.logger.debug(`\n📦 FINAL OUTPUT - ${finalQueries.length} queries:`);
+    finalQueries.forEach((q, i) => this.logger.debug(`   ${i + 1}. "${q}"`));
+    this.logger.debug(`${'='.repeat(60)}\n`);
 
-    return queries.slice(0, 3); // Max 3 variants
+    return finalQueries;
   }
 
-  extractFilters(query: string, type?: string, intent?: string): any {
+  /**
+   * ROOT FIX: LLM-based entity and filter extraction
+   * Replaces brittle keyword matching with semantic understanding
+   */
+  async extractFilters(
+    query: string,
+    history: ConversationHistory[],
+    type?: string,
+    intent?: string,
+  ): Promise<any> {
     const filters: any = {};
-
-    const lowerQuery = query.toLowerCase();
 
     // ==== SMART ROUTING: Different filters based on intent type ====
 
@@ -262,22 +298,41 @@ intent: [intent]`;
       return filters;
     }
 
-    // Extract entity type from query or intent
-    if (lowerQuery.includes('task') || intent === 'task_management') {
-      filters.entity_type = 'task';
-    } else if (lowerQuery.includes('team') || intent === 'team_info') {
-      filters.entity_type = 'team';
-    } else if (lowerQuery.includes('project') || intent === 'project_info') {
-      filters.entity_type = 'project';
-    } else if (
-      lowerQuery.includes('user') ||
-      lowerQuery.includes('member') ||
-      intent === 'user_info'
-    ) {
-      filters.entity_type = 'user';
+    // ROOT FIX: Use LLM to extract entity types semantically
+    try {
+      // Format history to string for entity extraction
+      const historyContext = this.formattingService.formatHistoryCompact(
+        history,
+        3,
+      );
+
+      const entityTypes = await this.entityExtractionService.extractEntityTypes(
+        query,
+        historyContext,
+      );
+
+      if (entityTypes.length > 1) {
+        filters.entity_types = entityTypes; // Array for multi-entity retrieval
+        this.logger.debug(
+          `🤖 LLM detected multi-entity: ${entityTypes.join(', ')}`,
+        );
+      } else if (entityTypes.length === 1) {
+        filters.entity_type = entityTypes[0]; // Single entity
+        this.logger.debug(`🤖 LLM detected entity: ${entityTypes[0]}`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Entity extraction failed: ${error.message}, using fallback`,
+      );
+      // Fallback to intent-based detection
+      if (intent === 'task_management') filters.entity_type = 'task';
+      else if (intent === 'team_info') filters.entity_type = 'team';
+      else if (intent === 'project_info') filters.entity_type = 'project';
+      else if (intent === 'user_info') filters.entity_type = 'user';
     }
 
-    // Extract status
+    // Status extraction (keep keyword-based for structured attributes)
+    const lowerQuery = query.toLowerCase();
     if (lowerQuery.includes('overdue')) filters['metadata.is_overdue'] = true;
     if (lowerQuery.includes('urgent')) filters['metadata.is_urgent'] = true;
     if (lowerQuery.includes('to do')) filters['metadata.task_status'] = 'to do';

@@ -15,25 +15,26 @@ export class DocumentTransformerService {
 
   /**
    * Transform User entity to searchable document
+   * ROOT FIX: Include UUID in searchable text for entity resolution
    */
   transformUser(user: User): TransformedDocument {
     try {
       // Build rich text representation
       const textParts: string[] = [];
 
-      // Basic info
-      textParts.push(`User Profile: ${user.name}`);
-      textParts.push(`${user.name}'s email is ${user.email}`);
-      textParts.push(`${user.name} is a ${this.formatRole(user.role)}`);
+      // ROOT FIX: Include ID in searchable text
+      textParts.push(`User: ${user.name} (ID: ${user.id})`);
+      textParts.push(`Email: ${user.email}`);
+      textParts.push(`Role: ${this.formatRole(user.role)}`);
 
       // Team information
       if (user.team) {
-        textParts.push(`${user.name} belongs to ${user.team.name} team`);
+        textParts.push(`Team: ${user.team.name} (Team ID: ${user.team.id})`);
         if (user.team.project) {
-          textParts.push(`Working on project: ${user.team.project.name}`);
+          textParts.push(`Project: ${user.team.project.name}`);
         }
       } else {
-        textParts.push(`${user.name} has no team assigned`);
+        textParts.push(`Team: none`);
       }
 
       // Tasks information
@@ -43,7 +44,7 @@ export class DocumentTransformerService {
           'task',
         );
         textParts.push(`Assigned tasks: ${taskSummary}`);
-        textParts.push(`Total tasks: ${user.tasks.length}`);
+        textParts.push(`Task count: ${user.tasks.length}`);
 
         // Task status breakdown
         const statusBreakdown = this.getTaskStatusBreakdown(
@@ -54,16 +55,11 @@ export class DocumentTransformerService {
           textParts.push(statusBreakdown);
         }
       } else {
-        textParts.push(`${user.name} has no tasks assigned`);
+        textParts.push(`Tasks: none assigned`);
       }
 
       // Dates
-      textParts.push(
-        `${user.name} joined on ${this.formatDate(user.createdAt)}`,
-      );
-      textParts.push(
-        `Profile last updated: ${this.formatDate(user.updatedAt)}`,
-      );
+      textParts.push(`Joined: ${this.formatDate(user.createdAt)}`);
 
       const text = textParts.join('\n');
 
@@ -246,43 +242,40 @@ export class DocumentTransformerService {
 
   /**
    * Transform Task entity to searchable document
+   * ROOT FIX: Include UUID in searchable text for entity resolution
    */
   transformTask(task: Task): TransformedDocument {
     try {
       const textParts: string[] = [];
 
-      // Basic info
-      textParts.push(`Task: ${task.title}`);
+      // ROOT FIX: Include ID in searchable text
+      textParts.push(`Task: ${task.title} (ID: ${task.id})`);
 
       if (task.description) {
-        textParts.push(`Details: ${task.description}`);
+        textParts.push(`Description: ${task.description}`);
       }
 
       // Status
-      textParts.push(`This task is ${this.formatTaskStatus(task.status)}`);
+      textParts.push(`Status: ${this.formatTaskStatus(task.status)}`);
 
-      // Assignee information
+      // Assignee information with ID
       if (task.assignee) {
         textParts.push(
-          `${task.title} is assigned to ${task.assignee.name} (${task.assignee.email})`,
+          `Assignee: ${task.assignee.name} (User ID: ${task.assignee.id})`,
         );
-        textParts.push(
-          `${task.assignee.name} is a ${this.formatRole(task.assignee.role)}`,
-        );
+        textParts.push(`Assignee email: ${task.assignee.email}`);
 
         // Team and project context
         if (task.assignee.team) {
           textParts.push(
-            `${task.assignee.name} works in ${task.assignee.team.name} team`,
+            `Team: ${task.assignee.team.name} (Team ID: ${task.assignee.team.id})`,
           );
           if (task.assignee.team.project) {
-            textParts.push(
-              `Part of ${task.assignee.team.project.name} project`,
-            );
+            textParts.push(`Project: ${task.assignee.team.project.name}`);
           }
         }
       } else {
-        textParts.push(`${task.title} is unassigned`);
+        textParts.push(`Assignee: unassigned`);
       }
 
       // Deadline
@@ -293,22 +286,21 @@ export class DocumentTransformerService {
         const daysUntilDeadline = this.getDaysUntilDeadline(task.deadline);
         if (daysUntilDeadline !== null) {
           if (daysUntilDeadline < 0) {
-            textParts.push(`⚠ Overdue by ${Math.abs(daysUntilDeadline)} days`);
+            textParts.push(`⚠ OVERDUE by ${Math.abs(daysUntilDeadline)} days`);
           } else if (daysUntilDeadline === 0) {
-            textParts.push('⚠ Due today');
+            textParts.push('⚠ Due TODAY');
           } else if (daysUntilDeadline <= 3) {
-            textParts.push(`⚠ Due in ${daysUntilDeadline} days (urgent)`);
+            textParts.push(`⚠ URGENT: Due in ${daysUntilDeadline} days`);
           } else {
             textParts.push(`Due in ${daysUntilDeadline} days`);
           }
         }
       } else {
-        textParts.push('No deadline set');
+        textParts.push('Deadline: not set');
       }
 
       // Dates
       textParts.push(`Created: ${this.formatDate(task.createdAt)}`);
-      textParts.push(`Last updated: ${this.formatDate(task.updatedAt)}`);
 
       const text = textParts.join('\n');
 

@@ -80,7 +80,7 @@ export class OllamaService implements OnModuleInit {
    */
   async checkHealth(): Promise<boolean> {
     try {
-      this.logger.log('Checking Ollama service health...');
+      this.logger.debug(`🔍 Checking Ollama health at ${this.baseUrl}...`);
 
       const response = await firstValueFrom(
         this.httpService.get(`${this.baseUrl}/api/version`, {

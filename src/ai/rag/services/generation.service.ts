@@ -1,10 +1,15 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
-import * as crypto from 'crypto';
+import { Injectable, Logger } from '@nestjs/common';
 import { OllamaService } from '../../llm/ollama.service';
 import { ConversationHistory } from './conversation.service';
 import { RetrievedDoc } from './search.service';
+import { LLMCacheService } from './llm-cache.service';
+import { FormattingService } from './formatting.service';
+import {
+  buildGenerateAnswerPrompt,
+  buildStreamAnswerPrompt,
+  buildFormatErrorPrompt,
+  getAnswerTemperature,
+} from '../../prompts';
 
 @Injectable()
 export class GenerationService {
@@ -12,35 +17,19 @@ export class GenerationService {
 
   constructor(
     private readonly ollamaService: OllamaService,
-    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly llmCacheService: LLMCacheService,
+    private readonly formattingService: FormattingService,
   ) {}
 
-  // ===== CACHED LLM WRAPPER (10x FASTER FOR REPEATED CALLS) =====
+  /**
+   * Cached LLM call - delegates to centralized LLMCacheService
+   */
   async cachedLLMCall(
     prompt: string,
     model?: string,
     options?: { temperature?: number; system?: string },
   ): Promise<string> {
-    const cacheKey = `llm:${crypto
-      .createHash('md5')
-      .update(prompt + (model || '') + JSON.stringify(options || {}))
-      .digest('hex')}`;
-
-    const cached = await this.cacheManager.get<string>(cacheKey);
-    if (cached) {
-      this.logger.debug(
-        `⚡ LLM CACHE HIT for prompt: ${prompt.substring(0, 50)}...`,
-      );
-      return cached;
-    }
-
-    const result = await this.ollamaService.generateCompletion(
-      prompt,
-      model,
-      options,
-    );
-    await this.cacheManager.set(cacheKey, result, 600000); // Cache for 10 minutes
-    return result;
+    return this.llmCacheService.cachedCall(prompt, { ...options, model });
   }
 
   async generateAnswer(
@@ -50,39 +39,51 @@ export class GenerationService {
     intentType?: string,
     intentCategory?: string,
   ): Promise<string> {
-    // Compact history format
-    const historyText = history
-      .slice(-2)
-      .map((h) => `[${h.role[0].toUpperCase()}] ${h.content}`)
-      .join('\n');
+    this.logger.debug(`\n${'='.repeat(60)}`);
+    this.logger.debug(`🤖 GENERATE ANSWER`);
+    this.logger.debug(`${'='.repeat(60)}`);
+    this.logger.debug(`📥 INPUT - Query: "${query}"`);
+    this.logger.debug(`📥 INPUT - Context length: ${context.length} chars`);
+    this.logger.debug(`📥 INPUT - History entries: ${history.length}`);
+    this.logger.debug(`📥 INPUT - Intent: ${intentType || 'unknown'}`);
 
-    // ==== OPTIMIZED INTENT-AWARE INSTRUCTIONS ====
-    const INSTRUCTIONS: Record<string, string> = {
-      requirements: 'List required fields. Use bullets. Note optional fields.',
-      statistics: 'Show numbers clearly. Use structured format.',
-      status: 'State current status directly. Be factual.',
-      list: 'Show items as bullet list with key details.',
-      analysis: 'Compare systematically. Highlight differences.',
-      help: 'Explain capabilities. Give examples.',
-    };
+    // Log context preview
+    this.logger.debug(`\n📄 CONTEXT PREVIEW:`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(
+      context.substring(0, 300) +
+        (context.length > 300 ? '\n... (truncated)' : ''),
+    );
+    this.logger.debug(`${'-'.repeat(60)}`);
 
-    const sysInst =
-      INSTRUCTIONS[intentType || ''] || 'Answer based on context. Be concise.';
+    // Use centralized formatting
+    const historyText = this.formattingService.formatHistoryCompact(history, 2);
 
-    // OPTIMIZED PROMPT: ~40% shorter
-    const prompt = `ROLE: Task management assistant.
-RULES: ${sysInst} If no answer in context, say so.
+    // Use centralized prompt
+    const prompt = buildGenerateAnswerPrompt(
+      query,
+      context,
+      historyText,
+      intentType,
+    );
 
-CONTEXT:
-${context}
-
-${historyText ? `HISTORY:\n${historyText}\n` : ''}Q: ${query}
-
-A:`;
+    this.logger.debug(`\n📤 LLM PROMPT (${prompt.length} chars):`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(
+      prompt.substring(0, 400) +
+        (prompt.length > 400 ? '\n... (truncated)' : ''),
+    );
+    this.logger.debug(`${'-'.repeat(60)}`);
 
     const response = await this.cachedLLMCall(prompt, undefined, {
-      temperature: intentType === 'statistics' ? 0.3 : 0.7, // Lower temp for stats (precision), higher for analysis
+      temperature: getAnswerTemperature(intentType),
     });
+
+    this.logger.debug(`\n📨 LLM RESPONSE:`);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(response);
+    this.logger.debug(`${'-'.repeat(60)}`);
+    this.logger.debug(`${'='.repeat(60)}\n`);
 
     return response.trim();
   }
@@ -93,20 +94,11 @@ A:`;
     history: ConversationHistory[],
     onChunk: (chunk: string) => void,
   ): Promise<string> {
-    const historyText = history
-      .slice(-2)
-      .map((h) => `[${h.role[0].toUpperCase()}] ${h.content}`)
-      .join('\n');
+    // Use centralized formatting
+    const historyText = this.formattingService.formatHistoryCompact(history, 2);
 
-    // OPTIMIZED STREAMING PROMPT
-    const prompt = `ROLE: Task assistant. Answer from context only. Be concise.
-
-CONTEXT:
-${context}
-
-${historyText ? `HISTORY:\n${historyText}\n` : ''}Q: ${query}
-
-A:`;
+    // Use centralized prompt
+    const prompt = buildStreamAnswerPrompt(query, context, historyText);
 
     return await this.ollamaService.generateCompletion(prompt, undefined, {
       temperature: 0.7,
@@ -117,6 +109,7 @@ A:`;
   }
 
   checkGrounding(answer: string, docs: RetrievedDoc[]): boolean {
+    this.logger.debug(`🔍 Checking answer grounding...`);
     // Check if answer contains references to the documents
     const contextWords = new Set(
       docs.flatMap((d) => d.text.toLowerCase().split(/\s+/)),
@@ -124,7 +117,12 @@ A:`;
     const answerWords = answer.toLowerCase().split(/\s+/);
 
     const matchedWords = answerWords.filter((w) => contextWords.has(w));
-    return matchedWords.length / answerWords.length > 0.3; // 30% overlap
+    const overlap = matchedWords.length / answerWords.length;
+    const isGrounded = overlap > 0.3; // 30% overlap
+    this.logger.debug(
+      `${isGrounded ? '✅' : '⚠️'} Grounding: ${(overlap * 100).toFixed(1)}% overlap`,
+    );
+    return isGrounded;
   }
 
   calculateConfidence(docs: RetrievedDoc[], grounded: boolean): number {
@@ -149,11 +147,8 @@ A:`;
     userQuery: string,
   ): Promise<string> {
     try {
-      // OPTIMIZED ERROR PROMPT: 50% shorter
-      const prompt = `User asked: "${userQuery}"
-Error: ${errorMessage}
-
-Explain in 1-2 plain sentences (no technical jargon). What went wrong + what to do:`;
+      // Use centralized prompt
+      const prompt = buildFormatErrorPrompt(errorMessage, userQuery);
 
       const response = await this.cachedLLMCall(prompt, undefined, {
         temperature: 0.3,
