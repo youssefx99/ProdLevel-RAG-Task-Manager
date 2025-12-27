@@ -28,8 +28,10 @@ export class RetrievalService {
 
     // Always keep the top-scored document first (guaranteed relevance)
     const selected: RetrievedDoc[] = [docs[0]];
-    this.logger.debug(`│  MMR [1]: ${docs[0].text.substring(0, 50)}... (score: ${docs[0].score.toFixed(4)})`);
-    
+    this.logger.debug(
+      `│  MMR [1]: ${docs[0].text.substring(0, 50)}... (score: ${docs[0].score.toFixed(4)})`,
+    );
+
     const remaining = docs.slice(1);
 
     while (selected.length < 5 && remaining.length > 0) {
@@ -128,11 +130,13 @@ export class RetrievalService {
   } {
     // Sort by score to ensure highest-relevance docs are first
     const sortedDocs = [...globalDocs].sort((a, b) => b.score - a.score);
-    
+
     // Log top results for debugging
     this.logger.log(`📊 Top 3 after RRF sort:`);
     sortedDocs.slice(0, 3).forEach((doc, i) => {
-      this.logger.log(`│  ${i + 1}. [${doc.entityType}] ${doc.text.substring(0, 60)}... (score: ${doc.score.toFixed(4)})`);
+      this.logger.log(
+        `│  ${i + 1}. [${doc.entityType}] ${doc.text.substring(0, 60)}... (score: ${doc.score.toFixed(4)})`,
+      );
     });
 
     // Reranking - take top 10 sorted by score
