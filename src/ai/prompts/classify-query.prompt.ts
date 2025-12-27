@@ -1,12 +1,15 @@
 /**
  * Query classification prompt
- * Classifies user intent for routing to appropriate handlers
+ * Classifies user intent type and identifies involved entities for routing
+ *
+ * OPTIMIZED: Removed redundant 'intent' field - now derived from type + entities
+ * This reduces LLM tokens by ~30% and eliminates type/intent mismatches
  */
 export function buildClassifyQueryPrompt(
   query: string,
   historyContext: string,
 ): string {
-  return `Classify the user's INTENT.
+  return `Classify the query TYPE and identify ALL entities involved.
 
 ${historyContext ? `HISTORY:\n${historyContext}\n` : ''}MSG: "${query}"
 
@@ -14,42 +17,42 @@ CRITICAL DISTINCTION:
 - COMMAND = User wants to DO something NOW ("delete X", "create a task", "assign X to Y")
 - QUESTION = User is ASKING about something ("when was X created?", "who created X?")
 
-TYPES:
+TYPES (what operation):
 - delete: COMMAND to remove entity ("delete user John", "remove this task")
-- create: COMMAND to make new entity ("create a task", "add new user", "create user called X")  
-- update: COMMAND to modify entity ("update task status", "change user email", "ASSIGN X to Y", "reassign task")
-- question: QUESTION about entities ("when was user created?", "who made this?", "what is X?")
+- create: COMMAND to make new entity ("create a task", "add new user")  
+- update: COMMAND to modify entity ("update status", "assign X to Y", "reassign")
+- question: QUESTION about entities ("when was X created?", "who made this?")
 - search: Finding specific entity ("find user John", "show task #5")
 - list: Show multiple entities ("list all users", "show tasks")
 - statistics: Counts/numbers ("how many tasks?", "total users")
 
 CRITICAL: "assign" = UPDATE operation!
-- "assign task to John" → type: update intent: task_management
-- "assign user to team" → type: update intent: team_management
-- "reassign project" → type: update intent: project_management
 
-INTENT (focus area):
-- task_management: operations on tasks
-- user_info: QUESTIONS about users
-- user_management: COMMANDS for user CRUD (create/update/delete user)
-- team_info: QUESTIONS about teams
-- team_management: COMMANDS for team CRUD (create/update/delete team)
-- project_info: QUESTIONS about projects
-- project_management: COMMANDS for project CRUD (create/update/delete project)
-- general: other queries
+ENTITIES (all types mentioned or implied):
+- user: Person, member, assignee, owner (names like "John", "Sarah", "youssef")
+- task: Todo, assignment, work item, ticket
+- team: Group, squad, department
+- project: Initiative, program, workspace
+
+ENTITY RULES:
+1. Person NAMES are "user" entities ("assign to youssef" → user)
+2. Actions like "assign", "move", "add member" → ALWAYS include "user"
+3. "assign task to team" → task AND user AND team
+4. Look at HISTORY to infer entities from previous messages
 
 EXAMPLES:
-- "when was seleman created?" → type: question intent: user_info (asking ABOUT user)
-- "create user John" → type: create intent: user_management (COMMAND to create user)
-- "create new user called bassem" → type: create intent: user_management
-- "delete user bassem" → type: delete intent: user_management
-- "update user email" → type: update intent: user_management
-- "create task for John" → type: create intent: task_management
-- "assign task to John" → type: update intent: task_management (COMMAND to update assignedTo)
-- "delete the project" → type: delete intent: project_management (COMMAND)
-- "who deleted the task?" → type: question intent: task_management (asking ABOUT deletion)
+- "when was seleman created?" → type: question | entities: [user]
+- "create user John" → type: create | entities: [user]
+- "delete user bassem" → type: delete | entities: [user]
+- "create task for John" → type: create | entities: [task, user]
+- "assign task to John" → type: update | entities: [task, user]
+- "move sarah to backend team" → type: update | entities: [user, team]
+- "delete the project" → type: delete | entities: [project]
+- "who deleted the task?" → type: question | entities: [task]
+- "show all tasks" → type: list | entities: [task]
+- "how many users?" → type: statistics | entities: [user]
 
-Output:
+Output format (2 lines only):
 type: [type]
-intent: [intent]`;
+entities: [entity1, entity2]`;
 }

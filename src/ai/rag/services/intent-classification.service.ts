@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConversationHistory } from './conversation.service';
 import { LLMCacheService } from './llm-cache.service';
 import { FormattingService } from './formatting.service';
-import { EntityExtractionService } from './entity-extraction.service';
 import {
   buildQuickIntentPrompt,
   buildClassifyQueryPrompt,
@@ -41,7 +40,6 @@ export class IntentClassificationService {
   constructor(
     private readonly llmCacheService: LLMCacheService,
     private readonly formattingService: FormattingService,
-    private readonly entityExtractionService: EntityExtractionService,
   ) {}
 
   // ===== QUICK INTENT DETECTION (Greeting/Goodbye/Thank) =====
@@ -119,7 +117,7 @@ export class IntentClassificationService {
   async classifyQuery(
     query: string,
     history: ConversationHistory[],
-  ): Promise<{ type: string; intent: string }> {
+  ): Promise<{ type: string; intent: string; entities: string[] }> {
     this.logger.debug(`\n${'='.repeat(60)}`);
     this.logger.debug(`🎯 QUERY CLASSIFICATION`);
     this.logger.debug(`${'='.repeat(60)}`);
@@ -132,7 +130,7 @@ export class IntentClassificationService {
       10,
     );
 
-    // Use centralized prompt
+    // Use centralized prompt (optimized: only type + entities)
     const prompt = buildClassifyQueryPrompt(query, historyContext);
 
     this.logger.debug(`\n📤 LLM PROMPT:`);
@@ -150,25 +148,67 @@ export class IntentClassificationService {
       this.logger.debug(response);
       this.logger.debug(`${'-'.repeat(60)}`);
 
-      // Parse response
+      // Parse response (optimized: only type + entities)
       const typeMatch = response.match(/type:\s*(\w+)/i);
-      const intentMatch = response.match(/intent:\s*(\w+)/i);
+      const entitiesMatch = response.match(/entities:\s*\[([^\]]*)\]/i);
 
       const type = typeMatch ? typeMatch[1].toLowerCase() : 'question';
-      const intent = intentMatch ? intentMatch[1].toLowerCase() : 'general';
+
+      // Parse entities array
+      let entities: string[] = [];
+      if (entitiesMatch && entitiesMatch[1]) {
+        entities = entitiesMatch[1]
+          .split(',')
+          .map((e) => e.trim().toLowerCase())
+          .filter(
+            (e) =>
+              e.length > 0 && ['user', 'task', 'team', 'project'].includes(e),
+          );
+      }
+
+      // OPTIMIZED: Derive intent from type + entities (no LLM needed)
+      const intent = this.deriveIntent(type, entities);
 
       this.logger.debug(`\n📦 PARSED OUTPUT:`);
       this.logger.debug(`   Type: "${type}"`);
-      this.logger.debug(`   Intent: "${intent}"`);
+      this.logger.debug(`   Intent: "${intent}" (derived)`);
+      this.logger.debug(`   Entities: [${entities.join(', ')}]`);
       this.logger.debug(`${'='.repeat(60)}\n`);
 
-      return { type, intent };
+      return { type, intent, entities };
     } catch (error) {
       this.logger.error(`❌ Classification failed: ${error.message}`);
       this.logger.debug(`${'='.repeat(60)}\n`);
       // Simplest fallback - treat as question
-      return { type: 'question', intent: 'general' };
+      return { type: 'question', intent: 'general', entities: [] };
     }
+  }
+
+  /**
+   * OPTIMIZED: Derive intent from type + entities
+   * Eliminates redundant LLM output - intent is now computed, not extracted
+   *
+   * Logic:
+   * - CRUD operations (create/update/delete) → {entity}_management
+   * - Read operations (question/search/list) → {entity}_info
+   * - No entity → 'general'
+   */
+  deriveIntent(type: string, entities: string[]): string {
+    const primaryEntity = entities[0] || 'general';
+
+    // CRUD operations use _management suffix
+    if (['create', 'update', 'delete'].includes(type)) {
+      return primaryEntity === 'general'
+        ? 'general'
+        : `${primaryEntity}_management`;
+    }
+
+    // Read operations use _info suffix
+    if (['question', 'search', 'list', 'statistics'].includes(type)) {
+      return primaryEntity === 'general' ? 'general' : `${primaryEntity}_info`;
+    }
+
+    return 'general';
   }
 
   /**
@@ -201,7 +241,7 @@ export class IntentClassificationService {
     // Build history context
     const historyContext = this.formattingService.formatHistoryCompact(
       history,
-      3,
+      10,
     );
 
     // Use centralized prompt
@@ -264,81 +304,38 @@ export class IntentClassificationService {
   }
 
   /**
-   * ROOT FIX: LLM-based entity and filter extraction
-   * Replaces brittle keyword matching with semantic understanding
+   * OPTIMIZED: Extract filters based on classification results
+   * Uses entities directly - no fallback needed since intent is derived from entities
+   *
+   * @param type - Query type (create/update/delete/question/search/list/statistics)
+   * @param entities - Entity types from classification [user, task, team, project]
    */
-  async extractFilters(
-    query: string,
-    history: ConversationHistory[],
-    type?: string,
-    intent?: string,
-  ): Promise<any> {
+  extractFilters(type: string, entities: string[]): any {
     const filters: any = {};
 
-    // ==== SMART ROUTING: Different filters based on intent type ====
+    // ==== SMART ROUTING: Different filters based on type ====
 
-    // 1. REQUIREMENTS intent → filter to system_info metadata
-    if (type === 'requirements') {
-      filters.metadata = { type: 'system_info' };
-      this.logger.debug('🎯 Requirements query → filtering to system_info');
-      return filters;
-    }
-
-    // 2. STATISTICS intent → filter to statistics metadata
+    // 1. STATISTICS type → filter to statistics metadata
     if (type === 'statistics') {
       filters.metadata = { type: 'statistics' };
       this.logger.debug('🎯 Statistics query → filtering to statistics');
       return filters;
     }
 
-    // 3. HELP intent → filter to system_info
-    if (type === 'help') {
+    // 2. HELP type → filter to system_info
+    if (type === 'help' || type === 'requirements') {
       filters.metadata = { type: 'system_info' };
-      this.logger.debug('🎯 Help query → filtering to system_info');
+      this.logger.debug('🎯 Help/Requirements → filtering to system_info');
       return filters;
     }
 
-    // ROOT FIX: Use LLM to extract entity types semantically
-    try {
-      // Format history to string for entity extraction
-      const historyContext = this.formattingService.formatHistoryCompact(
-        history,
-        3,
+    // Use entities directly for filtering
+    if (entities.length > 0) {
+      filters.entity_type = entities.length === 1 ? entities[0] : entities;
+      this.logger.debug(
+        `🎯 Entity filter: ${Array.isArray(filters.entity_type) ? filters.entity_type.join(', ') : filters.entity_type}`,
       );
-
-      const entityTypes = await this.entityExtractionService.extractEntityTypes(
-        query,
-        historyContext,
-      );
-
-      if (entityTypes.length > 1) {
-        filters.entity_types = entityTypes; // Array for multi-entity retrieval
-        this.logger.debug(
-          `🤖 LLM detected multi-entity: ${entityTypes.join(', ')}`,
-        );
-      } else if (entityTypes.length === 1) {
-        filters.entity_type = entityTypes[0]; // Single entity
-        this.logger.debug(`🤖 LLM detected entity: ${entityTypes[0]}`);
-      }
-    } catch (error) {
-      this.logger.warn(
-        `Entity extraction failed: ${error.message}, using fallback`,
-      );
-      // Fallback to intent-based detection
-      if (intent === 'task_management') filters.entity_type = 'task';
-      else if (intent === 'team_info') filters.entity_type = 'team';
-      else if (intent === 'project_info') filters.entity_type = 'project';
-      else if (intent === 'user_info') filters.entity_type = 'user';
     }
-
-    // Status extraction (keep keyword-based for structured attributes)
-    const lowerQuery = query.toLowerCase();
-    if (lowerQuery.includes('overdue')) filters['metadata.is_overdue'] = true;
-    if (lowerQuery.includes('urgent')) filters['metadata.is_urgent'] = true;
-    if (lowerQuery.includes('to do')) filters['metadata.task_status'] = 'to do';
-    if (lowerQuery.includes('in progress'))
-      filters['metadata.task_status'] = 'in progress';
-    if (lowerQuery.includes('done')) filters['metadata.task_status'] = 'done';
 
     return filters;
   }
