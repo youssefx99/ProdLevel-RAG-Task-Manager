@@ -5,6 +5,7 @@ import { Team } from './team.entity';
 import { CreateTeamDto } from './dto/create-team.dto';
 import { UpdateTeamDto } from './dto/update-team.dto';
 import { IndexingService } from '../ai/indexing/indexing.service';
+import { PaginatedResult } from '../common/dto/pagination.dto';
 
 @Injectable()
 export class TeamsService {
@@ -33,11 +34,26 @@ export class TeamsService {
     return savedTeam;
   }
 
-  async findAll(): Promise<Team[]> {
-    return await this.teamRepository.find({
+  async findAll(
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<PaginatedResult<Team>> {
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await this.teamRepository.findAndCount({
       relations: ['owner', 'project', 'users'],
       order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<Team> {
@@ -74,5 +90,9 @@ export class TeamsService {
   async remove(id: string): Promise<void> {
     const team = await this.findOne(id);
     await this.teamRepository.remove(team);
+  }
+
+  async count(): Promise<number> {
+    return this.teamRepository.count();
   }
 }
