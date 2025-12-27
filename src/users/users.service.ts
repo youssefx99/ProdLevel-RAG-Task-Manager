@@ -11,6 +11,7 @@ import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { IndexingService } from '../ai/indexing/indexing.service';
+import { PaginatedResult } from '../common/dto/pagination.dto';
 
 @Injectable()
 export class UsersService {
@@ -55,10 +56,25 @@ export class UsersService {
     return savedUser;
   }
 
-  async findAll(): Promise<User[]> {
-    return await this.userRepository.find({
+  async findAll(
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<PaginatedResult<User>> {
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await this.userRepository.findAndCount({
       order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<User> {
