@@ -8,10 +8,12 @@ import {
   Delete,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
+import { PaginationQueryDto } from '../common/dto/pagination.dto';
 
 @Controller('tasks')
 export class TasksController {
@@ -24,8 +26,15 @@ export class TasksController {
   }
 
   @Get()
-  findAll() {
-    return this.tasksService.findAll();
+  findAll(@Query() query: PaginationQueryDto) {
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 10;
+    return this.tasksService.findAll(page, limit);
+  }
+
+  @Get('count')
+  count() {
+    return this.tasksService.count();
   }
 
   @Get(':id')
