@@ -20,7 +20,6 @@ import { ActionExecutionService } from './services/action-execution.service';
 import { LLMCacheService } from './services/llm-cache.service';
 import { EntityResolutionService } from './services/entity-resolution.service';
 import { FormattingService } from './services/formatting.service';
-import { EntityExtractionService } from './services/entity-extraction.service';
 
 @Module({
   imports: [
@@ -44,8 +43,6 @@ import { EntityExtractionService } from './services/entity-extraction.service';
     LLMCacheService,
     EntityResolutionService,
     FormattingService,
-    EntityExtractionService,
-    // Refactored services
     ConversationService,
     IntentClassificationService,
     SearchService,

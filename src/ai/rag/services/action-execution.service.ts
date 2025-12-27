@@ -568,14 +568,35 @@ export class ActionExecutionService {
         return null;
       }
 
+      // ROOT FIX: Handle LLM returning just parameters (without name/arguments wrapper)
+      // Expected format: {"name":"update_task","arguments":{"taskId":"...","assignedTo":"..."}}
+      // Sometimes LLM returns: {"taskId":"...","assignedTo":"..."} (just the args)
+      let result: FunctionCall;
+      if (parsed.name && parsed.arguments) {
+        // LLM returned proper format
+        result = parsed;
+      } else if (Object.keys(parsed).length > 0) {
+        // LLM returned just the arguments - wrap them with the known function name
+        this.logger.debug(
+          `🔧 LLM returned raw params, wrapping with function: ${funcName}`,
+        );
+        result = {
+          name: funcName,
+          arguments: parsed,
+        };
+      } else {
+        this.logger.warn('❌ Empty parsed response');
+        return null;
+      }
+
       this.logger.debug(`\n📦 PARSED FUNCTION CALL:`);
-      this.logger.debug(`  Function: ${parsed.name}`);
+      this.logger.debug(`  Function: ${result.name}`);
       this.logger.debug(
-        `  Arguments: ${JSON.stringify(parsed.arguments, null, 2)}`,
+        `  Arguments: ${JSON.stringify(result.arguments, null, 2)}`,
       );
       this.logger.debug(`${'='.repeat(60)}\n`);
 
-      return parsed;
+      return result;
     } catch (error) {
       this.logger.error(`❌ Function call failed: ${error.message}`);
       return null;
