@@ -8,10 +8,12 @@ import {
   Delete,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
+import { PaginationQueryDto } from '../common/dto/pagination.dto';
 
 @Controller('projects')
 export class ProjectsController {
@@ -24,8 +26,15 @@ export class ProjectsController {
   }
 
   @Get()
-  findAll() {
-    return this.projectsService.findAll();
+  findAll(@Query() query: PaginationQueryDto) {
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 10;
+    return this.projectsService.findAll(page, limit);
+  }
+
+  @Get('count')
+  count() {
+    return this.projectsService.count();
   }
 
   @Get(':id')
