@@ -37,15 +37,25 @@ export class TeamsService {
   async findAll(
     page: number = 1,
     limit: number = 10,
+    search?: string,
   ): Promise<PaginatedResult<Team>> {
     const skip = (page - 1) * limit;
 
-    const [data, total] = await this.teamRepository.findAndCount({
-      relations: ['owner', 'project', 'users'],
-      order: { createdAt: 'DESC' },
-      skip,
-      take: limit,
-    });
+    const queryBuilder = this.teamRepository
+      .createQueryBuilder('team')
+      .leftJoinAndSelect('team.owner', 'owner')
+      .leftJoinAndSelect('team.project', 'project')
+      .leftJoinAndSelect('team.users', 'users');
+
+    if (search) {
+      queryBuilder.where('team.name LIKE :search', {
+        search: `%${search}%`,
+      });
+    }
+
+    queryBuilder.orderBy('team.createdAt', 'DESC').skip(skip).take(limit);
+
+    const [data, total] = await queryBuilder.getManyAndCount();
 
     return {
       data,
