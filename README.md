@@ -9,12 +9,14 @@ This backend service provides a comprehensive RESTful API for managing tasks, te
 ## Key Features
 
 ### Core Functionality
+
 - **Task Management**: Create, update, delete, and track tasks with status, priority, and deadline management
 - **Team Management**: Organize users into teams with role-based access control
 - **Project Management**: Handle project lifecycles with team assignments and task associations
 - **User Management**: Complete user authentication, authorization, and profile management
 
 ### AI-Powered Chat Assistant
+
 - **Natural Language Processing**: Interact with your data using conversational queries
 - **Hybrid Search**: Combines vector similarity and keyword matching for precise results
 - **Context-Aware Responses**: Generates grounded answers with citations from your actual data
@@ -23,6 +25,7 @@ This backend service provides a comprehensive RESTful API for managing tasks, te
 - **Smart Filtering**: Extracts filters like "overdue", "urgent", "in progress" from natural language
 
 ### Technical Architecture
+
 - **Vector Store**: Qdrant for semantic search and similarity matching
 - **Embeddings**: Ollama-powered text embeddings for document indexing
 - **LLM Integration**: Local Ollama models for response generation
@@ -52,18 +55,21 @@ This backend service provides a comprehensive RESTful API for managing tasks, te
 ## Installation
 
 1. **Clone the repository**
+
    ```bash
    git clone <repository-url>
    cd task-manager-backend
    ```
 
 2. **Install dependencies**
+
    ```bash
    npm install
    ```
 
 3. **Set up environment variables**
    Create a `.env` file in the root directory:
+
    ```env
    # Database
    DB_HOST=localhost
@@ -89,11 +95,13 @@ This backend service provides a comprehensive RESTful API for managing tasks, te
    ```
 
 4. **Start infrastructure services**
+
    ```bash
    docker-compose up -d
    ```
 
 5. **Run database migrations and seed data**
+
    ```bash
    npm run seed
    ```
@@ -145,6 +153,7 @@ npm run lint               # Lint and fix code
 ## API Documentation
 
 Once the server is running, access the interactive Swagger documentation at:
+
 ```
 http://localhost:3000/api
 ```
@@ -207,11 +216,14 @@ For issues or questions, please open an issue in the repository.
 $ npm run test
 
 # e2e tests
+
 $ npm run test:e2e
 
 # test coverage
+
 $ npm run test:cov
-```
+
+````
 
 ## Deployment
 
@@ -222,7 +234,7 @@ If you are looking for a cloud-based platform to deploy your NestJS application,
 ```bash
 $ npm install -g @nestjs/mau
 $ mau deploy
-```
+````
 
 With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
 

@@ -8,6 +8,12 @@ import { ProjectsModule } from './projects/projects.module';
 import { TasksModule } from './tasks/tasks.module';
 import { AuthModule } from './auth/auth.module';
 import { AiModule } from './ai/ai.module';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { User } from './users/user.entity';
+import { Team } from './teams/team.entity';
+import { Project } from './projects/project.entity';
+import { Task } from './tasks/task.entity';
 import databaseConfig from './config/database.config';
 import qdrantConfig from './config/qdrant.config';
 
@@ -28,6 +34,9 @@ import qdrantConfig from './config/qdrant.config';
       },
     }),
 
+    // Import entities for seeding
+    TypeOrmModule.forFeature([User, Team, Project, Task]),
+
     // Auth module
     AuthModule,
 
@@ -40,5 +49,7 @@ import qdrantConfig from './config/qdrant.config';
     ProjectsModule,
     TasksModule,
   ],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule {}
